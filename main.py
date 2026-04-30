@@ -65,11 +65,6 @@ users_collection     = db["quiz_users"]
 questions_collection = db["questions"]
 auth_chats_collection = db["auth_chats"]
 
-mongo_client = pymongo.MongoClient(MONGO_URI_2)
-mdb = mongo_client["assignment_bot"]
-assignments_collection = mdb["assignments"]
-submissions_collection = mdb["submissions"]
-
 cl2_db = pymongo.MongoClient(MONGO_URI_2)
 db2 = cl2_db[DB_NAME]
 uc_2 = db2["quiz_users"]
@@ -90,7 +85,6 @@ PAGE_SIZE = 10
 # ── State ─────────────────────────────────────────────────────────────────────
 ongoing_edits   = {}
 user_quiz_data  = {}
-broadcast_active = False
 TEMP_ACCESS     = {}
 
 import binascii
@@ -98,14 +92,6 @@ MASTER_KEY_HEX = binascii.hexlify(MASTER_KEY.encode() if isinstance(MASTER_KEY, 
 IV_HEX         = binascii.hexlify(IV_KEY.encode() if isinstance(IV_KEY, str) else IV_KEY).decode()
 MASTER_KEY_B   = binascii.unhexlify(MASTER_KEY_HEX)
 IV_B           = binascii.unhexlify(IV_HEX.ljust(32, "0"))[:16]
-
-user_quiz_data = {}
-broadcast_active = False 
-
-TEMP_ACCESS = {}
-
-MASTER_KEY_HEX = "2e4c5fe382452f9f636b059b4f5cfdfa"
-IV_HEX = "4048894e29ea"
 
 MASTER_KEY = binascii.unhexlify(MASTER_KEY_HEX)
 IV = binascii.unhexlify(IV_HEX.ljust(32, '0'))[:16]
@@ -129,45 +115,28 @@ def decrypt_test_id(encrypted_id: str) -> str:
     decrypted = unpad(cipher.decrypt(encrypted_data), AES.block_size)
     return decrypted.decode()
 
-FEATURES_TEXT = """> **📢 Features Showcase of Quizbot!** 🚀  
+FEATURES_TEXT = """> **📢 Quizbot Features** 🚀  
 
 🔹 **Create questions from text** just by providing a ✅ mark to the right options.  
 🔹 **Marathon Quiz Mode:** Create unlimited questions for a never-ending challenge.  
-🔹 **Convert Polls to Quizzes:** Simply forward polls (e.g., from @quizbot), and unnecessary elements like `[1/100]` will be auto-removed!  
+🔹 **Convert Polls to Quizzes:** Simply forward polls and unnecessary elements like `[1/100]` will be auto-removed!  
 🔹 **Smart Filtering:** Remove unwanted words (e.g., usernames, links) from forwarded polls.  
 🔹 **Skip, Pause & Resume** ongoing quizzes anytime.  
-🔹 **Bulk Question Support** via ChatGPT output.  
+🔹 **Bulk Question Support** via text or .txt file.  
 🔹 **Negative Marking** for accurate scoring.  
-🔹 **Edit Existing Quizzes** with ease like shuffle title editing timer adding removing questions and many more.  
-🔹 **Quiz Analytics:** View engagement, tracking how many users completed the quiz.  
+🔹 **Edit Existing Quizzes** — shuffle, title, timer, add/remove questions and more.  
+🔹 **Quiz Analytics:** Track how many users completed the quiz.  
 🔹 **Inline Query Support:** Share quizzes instantly via quiz ID.  
-🔹 **Free & Paid Quizzes:** Restrict access to selected users/groups—perfect for paid quiz series!  
-🔹 **Assignment Management:** Track student responses via bot submissions.  
+🔹 **Free & Paid Quizzes:** Restrict access to selected users/groups.  
 🔹 **View Creator Info** using the quiz ID.  
-🔹 **Generate Beautiful HTML Reports** with score counters, plus light/dark theme support.  
+🔹 **Generate Beautiful HTML Reports** with score counters, light/dark theme support.  
 🔹 **Manage Paid Quizzes:** Add/remove users & groups individually or in bulk.  
-🔹 **Video Tutorials:** Find detailed guides in the Help section.  
-🔹 **Auto-Send Group Results:** No need to copy-paste manually—send all results in one click! 
-🔹 **Create Sectional Quiz:** You can create different sections with different timing 🥳.
-🔹 **Slow/Fast**: Slow or fast ongoing quiz.
-🔹 **OCR Update** - Now extract text from PDFs or Photos
-🔹 **Comparison** of Result with accuracy, percentile and percentage
-🔹 Create Questions from TXT.
-🔹 Advance Mechanism with 99.99% uptime.
-🔹 Automated link and username removal from Poll's description and questions.
-🔹 Auto txt quiz creation from Wikipedia Britannia bbc news and 20+ articles sites.
-
-> **Latest update 🆕**
-
-🔹 Auto clone from official quizbot.
-🔹 Create from polls/already finishrd quizzes in channels and all try /extract.
-🔹 Create from Drishti IAS web Quiz try /quiztxt.
-
-> **🚀 Upcoming Features:** 
-
-🔸 Advance Engagement saving + later on perspective.
-🔸 More optimizations for a smoother experience.
-🔸 Suprising Updates...
+🔹 **Auto-Send Group Results:** Send all results in one click!  
+🔹 **Create Sectional Quiz:** Different sections with different timers 🥳.  
+🔹 **Slow/Fast/Normal**: Adjust quiz speed on the fly.  
+🔹 **Comparison** of results with accuracy, percentile and percentage.  
+🔹 Create Questions from TXT files.  
+🔹 Automated link and username removal from poll descriptions and questions.  
 
 > **📊 Live Tracker & Analysis:** 
 
@@ -716,7 +685,7 @@ async def handle_quiz_pagination(client, callback_query: CallbackQuery):
     await send_quiz_page(client, callback_query.message, quizzes, new_page_number, user_id, search_terms)
     await callback_query.answer()
     
-# Inline query handler for quizzes and assignments
+# Inline query handler for quizzes
 @app.on_inline_query()
 async def handle_inline_query(client, inline_query):
     query = inline_query.query.strip()
@@ -724,101 +693,62 @@ async def handle_inline_query(client, inline_query):
     if not query:
         return
 
-    if not query.startswith("ass_"):
-
-        quiz_data = questions_collection.find_one({"question_set_id": query})
-        if not quiz_data:
-            quiz_data = qc_2.find_one({"question_set_id": query})
-        
-        if not quiz_data:
-
-            await inline_query.answer(
-                results=[],
-                switch_pm_text="No quiz found for this ID",
-                switch_pm_parameter="start"
-            )
-            return
-
-        quiz_name = quiz_data["quiz_name"]
-        type = quiz_data["type"]
-        question_count = len(quiz_data["questions"])
-        timer = quiz_data["timer"]
-        nmark = quiz_data.get("negative_marking", 0)
-        start_deep_link = f"https://t.me/{client.me.username}?start={query}"
-        sections = quiz_data.get("sections", [])  
-        
-        message_text = (
-            f"**💳 Quiz Name:** {quiz_name}\n"
-            f"**#️⃣ Questions:** {question_count}\n"
-            f"**⏰ Timer:** {timer} seconds\n"
-            f"**🆔 Quiz ID:** `{query}`\n"
-            f"**🏴‍☠️ -ve Marking:** `{nmark}`\n"
-            f"**💰 Type:** `{type}`"
+    quiz_data = questions_collection.find_one({"question_set_id": query})
+    if not quiz_data:
+        quiz_data = qc_2.find_one({"question_set_id": query})
+    
+    if not quiz_data:
+        await inline_query.answer(
+            results=[],
+            switch_pm_text="No quiz found for this ID",
+            switch_pm_parameter="start"
         )
-        if sections:
-            message_text += "\n\n> **📂 Sections:**"
-            for i, section in enumerate(sections, start=1):
-                section_name = section["name"]
-                start_idx, end_idx = section["question_range"]
-                section_timer = section.get("timer", "Not specified")
-                message_text += (
-                    f"\n\n**Section {i}:** {section_name}\n"
-                    f"  - **Questions:** {start_idx} to {end_idx}\n"
-                    f"  - **Timer:** {section_timer} seconds"
-                )
-                
+        return
 
-        result = InlineQueryResultArticle(
-            id=query,
-            title=f"Quiz: {quiz_name}",
-            description=f"{question_count} questions | Timer: {timer} seconds",
-            input_message_content=InputTextMessageContent(
-                message_text=message_text,
-                disable_web_page_preview=True
-            ),
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎯 Start Quiz Now", url=f"https://t.me/{client.me.username}?start={query}")],
-                [InlineKeyboardButton("🚀 Start in Group", url=f"https://t.me/{client.me.username}?startgroup={query}")],
-                [InlineKeyboardButton("🔗 Share Quiz", switch_inline_query=query)],
-            ])
-        )
-
-        await inline_query.answer([result], cache_time=0)
-
-    else:
-
-        assignment_id = query.split('_')[1]  # Extract assignment ID from query
-        assignment = assignments_collection.find_one({"assignment_id": assignment_id})
-
-        if assignment:
-
-            assignment_text = f"""
-> 📚 **Assignment Details** 📚
-
-🆔 **Assignment ID:** `{assignment_id}`
-👨‍🏫 **Creator:** {assignment['creator_name']}
-📅 **Date Created:** {assignment['created_date']}
-"""
-
-            results = [
-                InlineQueryResultArticle(
-                    title=f"Assignment {assignment_id}",
-                    input_message_content=InputTextMessageContent(assignment_text),
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("DO Assignment", callback_data=f"do_{assignment_id}")],
-                        [InlineKeyboardButton("Share Assignment", switch_inline_query=query)]
-                    ])
-                )
-            ]
-
-            await inline_query.answer(results=results)
-        else:
-
-            await inline_query.answer(
-                results=[],
-                switch_pm_text="Assignment not found",
-                switch_pm_parameter="error"
+    quiz_name = quiz_data["quiz_name"]
+    quiz_type = quiz_data["type"]
+    question_count = len(quiz_data["questions"])
+    timer = quiz_data["timer"]
+    nmark = quiz_data.get("negative_marking", 0)
+    start_deep_link = f"https://t.me/{client.me.username}?start={query}"
+    sections = quiz_data.get("sections", [])
+    
+    message_text = (
+        f"**💳 Quiz Name:** {quiz_name}\n"
+        f"**#️⃣ Questions:** {question_count}\n"
+        f"**⏰ Timer:** {timer} seconds\n"
+        f"**🆔 Quiz ID:** `{query}`\n"
+        f"**🏴‍☠️ -ve Marking:** `{nmark}`\n"
+        f"**💰 Type:** `{quiz_type}`"
+    )
+    if sections:
+        message_text += "\n\n> **📂 Sections:**"
+        for i, section in enumerate(sections, start=1):
+            section_name = section["name"]
+            start_idx, end_idx = section["question_range"]
+            section_timer = section.get("timer", "Not specified")
+            message_text += (
+                f"\n\n**Section {i}:** {section_name}\n"
+                f"  - **Questions:** {start_idx} to {end_idx}\n"
+                f"  - **Timer:** {section_timer} seconds"
             )
+
+    result = InlineQueryResultArticle(
+        id=query,
+        title=f"Quiz: {quiz_name}",
+        description=f"{question_count} questions | Timer: {timer} seconds",
+        input_message_content=InputTextMessageContent(
+            message_text=message_text,
+            disable_web_page_preview=True
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🎯 Start Quiz Now", url=f"https://t.me/{client.me.username}?start={query}")],
+            [InlineKeyboardButton("🚀 Start in Group", url=f"https://t.me/{client.me.username}?startgroup={query}")],
+            [InlineKeyboardButton("🔗 Share Quiz", switch_inline_query=query)],
+        ])
+    )
+
+    await inline_query.answer([result], cache_time=0)
 
 user_create_limits = {}
 
@@ -909,113 +839,6 @@ async def help_command(client, message):
     )
     await message.reply(help_text, disable_web_page_preview=True)
 
-@app.on_message(filters.command("gcast") & filters.user(6693636856))  # Restrict broadcast to the bot owner
-async def broadcast(client, message: Message):
-    global broadcast_active
-    if not message.reply_to_message:
-        await message.reply("Please reply to the message you want to broadcast.")
-        return
-
-    if broadcast_active:
-        await message.reply("⚠️ A broadcast is already in progress! Wait until it finishes or use /stopcast.")
-        return
-
-    broadcast_active = True  # Set flag to active
-    broadcast_message = message.reply_to_message
-    user_list = list(users_collection.find())
-
-    total_users = len(user_list)
-    sent_count = 0
-    failed_count = 0
-
-    progress_message = await message.reply(f"📤 Broadcast started: 0/{total_users} users sent")
-
-    for index, user in enumerate(user_list):
-        if not broadcast_active:
-            await progress_message.edit_text(f"❌ Broadcast stopped at {sent_count}/{total_users} users.")
-            return  # Stop the broadcast if canceled
-
-        try:
-
-            if broadcast_message.text:
-                await client.send_message(
-                    chat_id=user["chat_id"],
-                    text=broadcast_message.text,
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            elif broadcast_message.photo:
-                await client.send_photo(
-                    chat_id=user["chat_id"],
-                    photo=broadcast_message.photo.file_id,
-                    caption=broadcast_message.caption if broadcast_message.caption else "",
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            elif broadcast_message.video:
-                await client.send_video(
-                    chat_id=user["chat_id"],
-                    video=broadcast_message.video.file_id,
-                    caption=broadcast_message.caption if broadcast_message.caption else "",
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            elif broadcast_message.document:
-                await client.send_document(
-                    chat_id=user["chat_id"],
-                    document=broadcast_message.document.file_id,
-                    caption=broadcast_message.caption if broadcast_message.caption else "",
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            elif broadcast_message.audio:
-                await client.send_audio(
-                    chat_id=user["chat_id"],
-                    audio=broadcast_message.audio.file_id,
-                    caption=broadcast_message.caption if broadcast_message.caption else "",
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            elif broadcast_message.voice:
-                await client.send_voice(
-                    chat_id=user["chat_id"],
-                    voice=broadcast_message.voice.file_id,
-                    caption=broadcast_message.caption if broadcast_message.caption else "",
-                    reply_markup=broadcast_message.reply_markup if broadcast_message.reply_markup else None
-                )
-
-            else:
-                await client.send_message(
-                    chat_id=user["chat_id"],
-                    text="📢 Broadcast Message (Unsupported format)",
-                )
-
-            sent_count += 1
-
-        except Exception:
-            failed_count += 1
-
-        if (index + 1) % 100 == 0 or (index + 1) == total_users:
-            await progress_message.edit_text(
-                f"📤 Broadcast Progress: {sent_count}/{total_users} users sent"
-            )
-            await asyncio.sleep(10)  # Sleep for 10 seconds after 100 messages
-
-    
-    broadcast_active = False  # Reset flag after completion
-    await progress_message.edit_text(
-        f"✅ Broadcast completed: {sent_count}/{total_users} users successfully sent\n❌ Failed: {failed_count} users"
-    )
-@app.on_message(filters.command("stopcast") & filters.user(6693636856))  # Restrict stop command to the owner
-async def stop_broadcast(client, message: Message):
-    global broadcast_active
-    if not broadcast_active:
-        await message.reply("⚠️ No active broadcast to stop.")
-        return
-
-    broadcast_active = False  # Set flag to stop the ongoing broadcast
-    await message.reply("✅ Broadcast has been stopped.")
-    
 
 @app.on_message(filters.command("stats") & filters.user(7770737860))
 async def stats_quiz(client, message):
@@ -1737,127 +1560,6 @@ async def info_quiz(client, message):
 
     await message.reply(f"👨‍🏫 **Creator Name:** {creator_name} his id `{creator_id}`")
 
-@app.on_message(filters.command("assignment") & filters.private)
-async def create_assignment(client, message):
-    creator_id = message.from_user.id
-    creator_name = message.from_user.first_name  # Get creator's name
-    
-
-    if message.reply_to_message and message.reply_to_message.document:
-        doc_message = message.reply_to_message
-    elif message.document:
-        doc_message = message
-    else:
-        await message.reply_text("Please reply to a document or send a document with the /assignment command.")
-        return
-    
-
-    forwarded = await doc_message.forward(BOT_GROUP)
-    file_id = forwarded.document.file_id
-
-    assignment_id = generate_random_id()
-
-    created_date = datetime.now().strftime("%d %B %Y")  # Example: 18 February 2025
-
-    assignment_data = {
-        "assignment_id": assignment_id,
-        "creator_id": creator_id,
-        "file_id": file_id,
-        "text": message.caption or "",
-        "created_date": created_date,
-        "creator_name": creator_name
-    }
-    assignments_collection.insert_one(assignment_data)
-
-    assignment_text = f"""
-> 📚 **New Assignment Posted** 📚
-
-🆔 **Assignment ID:** `{assignment_id}`
-👨‍🏫 **Creator:** {creator_name}
-📅 **Date Created:** {created_date}
-"""
-
-    await message.reply_text(
-        f"Assignment Created Successfully! Assignment ID: `{assignment_id}`",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📁 Share Assignment", switch_inline_query=f"ass_{assignment_id}")]
-        ])
-    )
-
-def generate_random_id(length=7):
-
-    characters = string.ascii_letters + string.digits  # A-Z, a-z, 0-9
-    
-
-    random_id = ''.join(random.choices(characters, k=length))
-    
-    return random_id
-
-# Callback handler for "DO Assignment" button
-@app.on_callback_query(filters.regex(r"do_([\w]+)"))
-async def do_assignment(client, callback_query):
-    assignment_id = callback_query.data.split("_")[1]
-    assignment = assignments_collection.find_one({"assignment_id": assignment_id})
-
-    if assignment:
-
-        student_id = callback_query.from_user.id  # Get student ID
-        await client.send_document(
-            chat_id=student_id,  # Send the assignment directly to the student
-            document=assignment["file_id"],
-            caption=f"Assignment ID: `{assignment_id}`\n\n{assignment['text']}",
-        )
-
-        await callback_query.answer("Assignment sent to you!", show_alert=True)
-    else:
-        await callback_query.answer("Assignment not found.", show_alert=True)
-
-@app.on_message(filters.command("submit") & filters.private)
-async def submit_assignment(client, message):
-    if len(message.command) < 2:
-        await message.reply_text("Usage: Reply to a document with `/submit ASSIGNMENT_ID`")
-        return
-
-    assignment_id = message.command[1]
-    assignment = assignments_collection.find_one({"assignment_id": assignment_id})
-
-    if not assignment:
-        await message.reply_text("Invalid Assignment ID.")
-        return
-
-    if not message.reply_to_message or not message.reply_to_message.document:
-        await message.reply_text("Please reply to a document with `/submit ASSIGNMENT_ID`.")
-        return
-
-    document = message.reply_to_message.document
-    student_id = message.from_user.id  # Get student ID
-    student_name = message.from_user.first_name  # Get student's first name
-    creator_id = assignment["creator_id"]  # Get creator's ID
-
-    existing_submission = submissions_collection.find_one({
-        "assignment_id": assignment_id,
-        "submitted_by": student_id
-    })
-
-    if existing_submission:
-        await message.reply_text("You have already submitted this assignment.")
-        return
-
-    await client.send_document(
-        chat_id=creator_id,
-        document=document.file_id,
-        caption=f"🔖 **Assignment ID:** {assignment_id}\n🆔 Student ID: {student_id}\n👨‍🎓 Student Name: {student_name}"
-    )
-
-    submission_data = {
-        "assignment_id": assignment_id,
-        "submitted_by": student_id,
-        "file_id": document.file_id,
-    }
-    submissions_collection.insert_one(submission_data)
-
-    await message.reply_text("Assignment submitted successfully!")
-
 # 🛑 /stopedit Command - Cancel Editing Session
 @app.on_message(filters.command("stopedit") & filters.private)
 async def stop_edit(client, message):
@@ -2064,275 +1766,13 @@ async def handle_callback(client, callback_query: CallbackQuery):
         ])
         await callback_query.message.edit_text("🔀 Select a shuffle option:", reply_markup=keyboard)
 
-async def extract_quiz_questions(app: Client, url_message: str, user_id: int, log_group_id: int, user_quiz_data: dict):
-    """
-    Extract quiz questions from URL using PHP API and process them for Pyrogram quiz.
-    
-    Args:
-        app: Pyrogram Client instance
-        url_message: Message containing URL and range (e.g., "https://rojgarwithankit.co.in/test-series/589/test-ssc/30109/terms 12-20")
-        user_id: User ID for storing quiz data
-        log_group_id: Log group chat ID for uploading images
-        user_quiz_data: Global dictionary to append questions to
-    
-    Returns:
-        int: Number of questions extracted
-    """
-    
-
-    parts = url_message.strip().split()
-    url = parts[0]
-    question_range = parts[1] if len(parts) > 1 else None
-    subject_id = None
-    
-    url_pattern = r'/test-series/(\d+)/[^/]+/(\d+)'
-    match = re.search(url_pattern, url)
-    subject_match = re.search(r'[?&]subjectId=(\d+)', url)
-    subject_id = subject_match.group(1) if subject_match else None
-    if not match:
-        raise ValueError(
-            "Invalid URL format. Expected format: "
-            "/test-series/{series_id}/<any>/{test_id}/terms"
-            )
-    
-    test_series_id = match.group(1)
-    test_id = match.group(2)
-    
-
-    start_idx = 0
-    end_idx = None
-    
-    if question_range:
-        range_match = re.match(r'(\d+)-(\d+)', question_range)
-        if range_match:
-            start_idx = int(range_match.group(1)) - 1  # Convert to 0-based index
-            end_idx = int(range_match.group(2))
-    
-
-    api_url = "purchase the api"
-    
-    try:
-        params = {
-        'test_series_id': test_series_id,
-        'test_id': test_id,
-        'user_id': user_id
-        }
-
-        if subject_id:
-            params['subject_id'] = subject_id
-        
-        api_response = requests.get(
-            api_url,
-            params=params,
-            timeout=30
-        )
-        api_response.raise_for_status()
-        api_data = api_response.json()
-        
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to fetch from PHP API: {str(e)}")
-    
-
-    if api_data.get('status') != 'success':
-        error_msg = api_data.get('message', 'Unknown error from API')
-        raise Exception(f"API Error: {error_msg}")
-    
-
-    questions_url = api_data.get('questions_url')
-    if not questions_url:
-        raise ValueError("Questions URL not found in API response")
-    
-
-    try:
-        questions_response = requests.get(questions_url, timeout=30)
-        questions_response.raise_for_status()
-        questions_data = questions_response.json()
-    except requests.exceptions.RequestException as e:
-        raise Exception(f"Failed to fetch questions: {str(e)}")
-    
-
-    if end_idx:
-        questions_to_process = questions_data[start_idx:end_idx]
-    else:
-        questions_to_process = questions_data[start_idx:]
-    
-
-    if user_id not in user_quiz_data:
-        user_quiz_data[user_id] = {"questions": []}
-    
-
-    processed_count = 0
-    
-
-    for q_data in questions_to_process:
-        try:
-
-            has_option_image = any([
-                q_data.get(f'option_image_{i}', '').strip() 
-                for i in range(1, 11)
-            ])
-            
-            if has_option_image:
-                print(f"Skipping question {q_data.get('id')} - contains option images")
-                continue
-            
-
-            question_html = q_data.get('question', '')
-            question_text = clean_html(question_html)
-            
-
-            options = []
-            for i in range(1, 11):
-                option_html = q_data.get(f'option_{i}', '').strip()
-                if option_html:
-                    option_text = clean_html(option_html)
-                    options.append(option_text)
-            
-
-            if len(options) < 2 or len(options) > 10:
-                print(f"Skipping question {q_data.get('id')} - invalid number of options: {len(options)}")
-                continue
-            
-
-            correct_answer = q_data.get('answer', '1')
-            correct_option_index = int(correct_answer) - 1
-            
-
-            solution_html = q_data.get('solution_text', '')
-            explanation = clean_html(solution_html)
-            
-
-            file_id = None
-            image_links = [
-                q_data.get('image_link_1', '').strip(),
-                q_data.get('image_link_2', '').strip(),
-                q_data.get('image_link_3', '').strip()
-            ]
-            
-
-            for img_url in image_links:
-                if img_url:
-                    try:
-                        file_id = await upload_image_to_log_group(app, img_url, log_group_id)
-                        if file_id:
-                            break
-                    except Exception as e:
-                        print(f"Failed to upload image {img_url}: {e}")
-            
-
-            user_quiz_data[user_id]["questions"].append({
-                "question": question_text,
-                "options": options,
-                "correct_option_id": correct_option_index,
-                "explanation": explanation,
-                "reply_text": "",  # No reply text needed
-                "file_id": file_id,
-            })
-            
-            processed_count += 1
-            
-        except Exception as e:
-            print(f"Error processing question {q_data.get('id')}: {e}")
-            continue
-    
-    return processed_count
-
-async def upload_image_to_log_group(app: Client, image_url: str, log_group_id: int) -> str:
-    """
-    Upload image to log group and return file_id.
-    
-    Args:
-        app: Pyrogram Client instance
-        image_url: URL of the image to upload
-        log_group_id: Chat ID of the log group
-    
-    Returns:
-        str: file_id of the uploaded image
-    """
-
-    response = requests.get(image_url, timeout=10)
-    response.raise_for_status()
-    
-
-    import tempfile
-    import os
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-        tmp_file.write(response.content)
-        tmp_path = tmp_file.name
-    
-    try:
-
-        message = await app.send_photo(
-            chat_id=log_group_id,
-            photo=tmp_path,
-            caption=f"Quiz image from: {image_url}"
-        )
-        
-
-        file_id = message.photo.file_id
-        
-        return file_id
-    
-    finally:
-
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-async def handle_rojgar_link(client: Client, message: Message, log_group_id: int, user_quiz_data: dict):
-    """
-    Handler for rojgarwithankit.co.in links.
-    Extracts quiz questions and appends them to user_quiz_data.
-    
-    Args:
-        client: Pyrogram Client instance
-        message: Message object
-        log_group_id: Log group chat ID for uploading images
-        user_quiz_data: Dictionary to append questions to
-    
-    Returns:
-        int: Number of questions extracted
-    """
-    user_id = message.from_user.id
-    
-
-    url_message = message.text
-    
-
-    processing_msg = await message.reply_text("⏳ Processing quiz questions...")
-    
-    try:
-        processed_count = await extract_quiz_questions(
-            app=client,
-            url_message=url_message,
-            user_id=user_id,
-            log_group_id=log_group_id,
-            user_quiz_data=user_quiz_data
-        )
-        
-        if processed_count == 0:
-            await processing_msg.edit_text("❌ No valid questions found in the specified range.")
-            return 0
-        
-        await processing_msg.edit_text(
-            f"✅ Extracted {processed_count} questions successfully!\n"
-            f"Total questions in queue: {len(user_quiz_data[user_id]['questions'])}"
-        )
-        
-        return processed_count
-        
-    except Exception as e:
-        await processing_msg.edit_text(f"❌ Error: {str(e)}")
-        print(f"Error in handle_rojgar_link: {e}")
-        return 0
-
 @app.on_message(
     (filters.text | filters.poll) & 
     filters.private & 
     ~filters.command([
-        "start", "create", "myquizzes", "pause", "features", "gcast", "fast", "slow", "normal",
-        "stopcast", "resume", "edit", "info", "ban", "done", "add", "rem", "assignment", "submit",
-        "remall", "del", "remove", "clearlist", "stats", "help", "stop", "stopedit", "cancel", "ocr", "login", "quiz", "addfilter", "listfilters", "removefilter", "quizhelp"
+        "start", "create", "myquizzes", "pause", "features", "fast", "slow", "normal",
+        "resume", "edit", "info", "ban", "done", "add", "rem",
+        "remall", "del", "remove", "clearlist", "stats", "help", "stop", "stopedit", "cancel"
     ])
 )
 async def handle_all_messages(client, message):
@@ -2843,10 +2283,6 @@ async def handle_all_messages(client, message):
             await app.send_message(BOT_GROUP, fresh_text, reply_markup=keyboard)
             return
             
-        if "rojgarwithankit.co.in" in message.text and "/test-series/" in message.text:
-            await handle_rojgar_link(client, message, BOT_GROUP, user_quiz_data)
-            return
-            
 
         questions_blocks = message.text.split("\n\n")
         reply_message = message.reply_to_message
@@ -2955,31 +2391,5 @@ async def handle_all_messages(client, message):
             await message.reply(f"✅ Reached {total} soon getting 200 it is advised to stop here...")
             return
         await message.reply(f"✅ {total} Questions saved! Send the next question set, .txt or quiz poll or type /done when finished or /cancel to cancel")
-
-@app.on_message(filters.private & filters.reply)
-async def handle_creator_reply(client, message):
-    if not message.reply_to_message or not message.reply_to_message.caption:
-
-        return
-
-    caption_lines = message.reply_to_message.caption.split("\n")
-    
-    student_id_line = next((line for line in caption_lines if "🆔 Student ID:" in line), None)
-    student_name_line = next((line for line in caption_lines if "👨‍🎓 Student Name:" in line), None)
-    assignment_id_line = next((line for line in caption_lines if "🔖 Assignment ID:" in line), None)
-
-    if not student_id_line:
-
-        return
-
-    student_id = int(student_id_line.split(":")[1].strip())  # Extract student ID
-    student_name = student_name_line.split(":")[1].strip() if student_name_line else "Student"
-
-    await client.send_message(
-        student_id,
-        f"Hello {student_name}, you got creator's reply fro assignment ID : `{assignment_id_line}`\n\n{message.text}"
-    )
-
-    await message.reply_text("Your reply has been sent to the student.")
 
 app.run()
