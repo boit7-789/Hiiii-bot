@@ -93,13 +93,6 @@ IV_HEX         = binascii.hexlify(IV_KEY.encode() if isinstance(IV_KEY, str) els
 MASTER_KEY_B   = binascii.unhexlify(MASTER_KEY_HEX)
 IV_B           = binascii.unhexlify(IV_HEX.ljust(32, "0"))[:16]
 
-user_quiz_data = {}
-
-TEMP_ACCESS = {}
-
-MASTER_KEY_HEX = "2e4c5fe382452f9f636b059b4f5cfdfa"
-IV_HEX = "4048894e29ea"
-
 MASTER_KEY = binascii.unhexlify(MASTER_KEY_HEX)
 IV = binascii.unhexlify(IV_HEX.ljust(32, '0'))[:16]
 
@@ -713,7 +706,7 @@ async def handle_inline_query(client, inline_query):
         return
 
     quiz_name = quiz_data["quiz_name"]
-    type = quiz_data["type"]
+    quiz_type = quiz_data["type"]
     question_count = len(quiz_data["questions"])
     timer = quiz_data["timer"]
     nmark = quiz_data.get("negative_marking", 0)
@@ -726,7 +719,7 @@ async def handle_inline_query(client, inline_query):
         f"**⏰ Timer:** {timer} seconds\n"
         f"**🆔 Quiz ID:** `{query}`\n"
         f"**🏴‍☠️ -ve Marking:** `{nmark}`\n"
-        f"**💰 Type:** `{type}`"
+        f"**💰 Type:** `{quiz_type}`"
     )
     if sections:
         message_text += "\n\n> **📂 Sections:**"
