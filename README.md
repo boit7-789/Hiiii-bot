@@ -130,7 +130,7 @@ The database and all its indexes are created automatically on first connect — 
 
 ## ⚙️ Configuration Reference
 
-All values live in `.env` (copy from [`.env.example`](.env.example)).
+All values live in `.env` (copy from [`.env.example`](.env.example)). Note: you must not expose these values in the repo you fork directly otherwise you may loose your bot, data (securely fill these vars and secret in the environment of the platform you are using) 
 
 | Variable | Required | Description |
 |---|---|---|
