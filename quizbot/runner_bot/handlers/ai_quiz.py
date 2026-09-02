@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 from typing import Any, List
 from telegram import Update
-from telegram.constants import ParseMode, ChatAction
+from telegram.constants import ParseMode, ChatAction, PollType
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from ..ai_key_manager import ai_engine
@@ -15,28 +16,47 @@ logger = logging.getLogger(__name__)
 
 
 async def _launch_ai_quiz(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, questions_data: List[dict], topic: str) -> None:
-    """Helper used by /aiquiz and /pdfquiz to output or launch generated questions."""
-    lines = [f"🎯 <b>Quiz Generated: {topic.title()}</b>\n"]
+    """Helper used to send questions as real interactive Telegram Quiz Polls."""
+    await safe_send_message(
+        ctx,
+        chat_id,
+        f"🎯 <b>Interactive Quiz: {topic.title()}</b>\n<i>Answer the polls below:</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
     for i, q in enumerate(questions_data, 1):
-        q_text = q.get("question", "")
-        options = q.get("options", [])
+        q_text = f"Q{i}. {q.get('question', '').strip()}"
+        options = [str(opt).strip() for opt in q.get("options", []) if str(opt).strip()]
+        
+        # Ensure Telegram poll limits: 1 to 300 chars for question, max 100 chars per option
+        q_text = (q_text[:297] + "...") if len(q_text) > 300 else q_text
+        options = [(opt[:97] + "...") if len(opt) > 100 else opt for opt in options][:10]
+
         cid = q.get("correct_option_id", 0)
-        exp = q.get("explanation", "")
+        if not (0 <= cid < len(options)):
+            cid = 0
 
-        lines.append(f"<b>Q{i}. {q_text}</b>")
-        for idx, opt in enumerate(options):
-            marker = "✅" if idx == cid else "•"
-            lines.append(f"  {marker} {opt}")
-        if exp:
-            lines.append(f"  💡 <i>{exp}</i>")
-        lines.append("")
+        explanation = q.get("explanation", "").strip()
+        explanation = (explanation[:197] + "...") if len(explanation) > 200 else explanation
 
-    final_text = "\n".join(lines).strip()
-    await safe_send_message(ctx, chat_id, final_text, parse_mode=ParseMode.HTML)
+        try:
+            await ctx.bot.send_poll(
+                chat_id=chat_id,
+                question=q_text,
+                options=options,
+                type=PollType.QUIZ,
+                correct_option_id=cid,
+                explanation=explanation if explanation else None,
+                is_anonymous=False,
+            )
+            # Small delay to keep questions strictly in order
+            await asyncio.sleep(0.5)
+        except Exception as err:
+            logger.error("Failed to send poll %d: %s", i, err)
 
 
 async def aiquiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /aiquiz <topic>: Generate 5 MCQs using the multi-engine pool."""
+    """Handle /aiquiz <topic>: Generate 5 interactive Quiz Polls via AI engine."""
     if not update.message:
         return
 
@@ -59,24 +79,25 @@ async def aiquiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     status_msg = await safe_send_message(
         ctx,
         chat_id,
-        f"⚡ <i>Generating questions for:</i> <b>{topic}</b>...",
+        f"⚡ <i>Generating interactive quiz polls for:</i> <b>{topic}</b>...",
         parse_mode=ParseMode.HTML,
     )
 
     prompt = (
-        f"You are a professional competitive exam question creator.\n"
-        f"Generate exactly 5 high-quality multiple choice questions on the topic: '{topic}'.\n"
-        f"Rules:\n"
-        f"1. Each question must have exactly 4 options.\n"
-        f"2. Provide correct_option_id as an integer (0 for A, 1 for B, 2 for C, 3 for D).\n"
-        f"3. Keep the explanation crisp and under 35 words.\n"
-        f"4. Respond ONLY with a valid JSON array matching this format (no markdown code blocks, no text outside JSON):\n"
+        f"You are an expert exam question creator.\n"
+        f"Generate exactly 5 high-yield multiple-choice questions on: '{topic}'.\n"
+        f"Rules for Telegram Polls:\n"
+        f"1. Each question must have exactly 4 concise options (under 80 characters each).\n"
+        f"2. Keep the question text under 250 characters.\n"
+        f"3. Provide correct_option_id as an integer (0 for A, 1 for B, 2 for C, 3 for D).\n"
+        f"4. Keep explanation under 150 characters.\n"
+        f"5. Return ONLY a valid JSON array matching this format (no markdown blocks, no text outside JSON):\n"
         f"[\n"
         f"  {{\n"
         f'    "question": "Question text here?",\n'
         f'    "options": ["Option A", "Option B", "Option C", "Option D"],\n'
         f'    "correct_option_id": 0,\n'
-        f'    "explanation": "Why this option is correct."\n'
+        f'    "explanation": "Brief explanation why correct."\n'
         f"  }}\n"
         f"]"
     )
@@ -86,10 +107,10 @@ async def aiquiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         cleaned_json = re.sub(r"^```(?:json)?|```$", "", raw_output.strip(), flags=re.MULTILINE).strip()
         data = json.loads(cleaned_json)
         if not isinstance(data, list):
-            raise ValueError("Parsed output is not a list.")
+            raise ValueError("Output must be a list of questions.")
     except Exception as exc:
-        logger.error("AI quiz generation failed: %s", exc)
-        err_text = f"❌ <b>Failed to generate questions.</b>\nError: <code>{str(exc)[:100]}</code>"
+        logger.error("AI quiz generation error: %s", exc)
+        err_text = f"❌ <b>Failed to generate quiz polls.</b>\nError: <code>{str(exc)[:100]}</code>"
         if status_msg:
             await status_msg.edit_text(err_text, parse_mode=ParseMode.HTML)
         else:
