@@ -19,33 +19,40 @@ from . import handlers
 logger = logging.getLogger(__name__)
 
 
-async def private_chat_guard(update: Update, context) -> None:
-    """Controls Runner Bot access in private DMs:
-    1. Unauthorized users are completely ignored.
-    2. Creator Bot commands (/help, /create, etc.) are ignored by the Runner Bot
-       so the Creator Bot handles them cleanly without duplicate replies.
-    3. Quiz execution commands (/start <quiz_id>, /stop, /pause, poll answers)
-       are permitted in DM for you/authorized users.
+def _is_owner(user_id: int) -> bool:
+    owner_id = getattr(config, "OWNER_ID", None) or getattr(config, "ADMIN_USER_ID", None)
+    try:
+        return int(owner_id) == user_id
+    except (TypeError, ValueError):
+        return False
+
+
+async def runner_gatekeeper(update: Update, context) -> None:
+    """1. Private DMs: Creator bot handles general commands. Runner only allows
+       authorized users to play personal quizzes (/quiz <id>).
+    2. Groups: Students can vote on polls freely. Gated commands are checked
+       inside each handler via _require_admin / is_premium_user.
     """
     msg = update.effective_message
     user = update.effective_user
 
-    # If it's a private chat
+    # Handle Private DM restrictions
     if msg and msg.chat and msg.chat.type == ChatType.PRIVATE:
-        # Step A: Drop updates entirely if the user is unauthorized
-        if not user or not await is_premium_user(user.id):
+        if not user:
             raise ApplicationHandlerStop
 
-        # Step B: If it's a bare /start or Creator command, let Creator Bot answer it
+        is_adm = _is_owner(user.id)
+        is_auth = is_adm or await is_premium_user(user.id)
+
+        # Drop unauthorized users entirely in DM (Creator Bot will show access card)
+        if not is_auth:
+            raise ApplicationHandlerStop
+
         text = (msg.text or "").strip()
         cmd = text.split()[0].lower() if text.startswith("/") else ""
 
-        # Plain /start (without a quiz ID) or /help belong strictly to Creator Bot
-        if cmd == "/start" and len(text.split()) == 1:
-            raise ApplicationHandlerStop
-
+        # Mute Creator-only commands so Runner Bot never duplicates responses
         creator_only_commands = {
-            "/help",
             "/create",
             "/done",
             "/cancel",
@@ -63,9 +70,12 @@ async def private_chat_guard(update: Update, context) -> None:
         if cmd in creator_only_commands:
             raise ApplicationHandlerStop
 
+        # Let Creator Bot handle bare /start in DM
+        if cmd == "/start" and len(text.split()) == 1:
+            raise ApplicationHandlerStop
+
 
 def build_application() -> Application:
-    """Construct the Runner Bot application."""
     app = (
         ApplicationBuilder()
         .token(config.RUNNER_BOT_TOKEN)
@@ -74,33 +84,7 @@ def build_application() -> Application:
     )
 
     # Priority group -1 ensures this check runs before any command handlers
-    app.add_handler(TypeHandler(Update, private_chat_guard), group=-1)
+    app.add_handler(TypeHandler(Update, runner_gatekeeper), group=-1)
 
     handlers.register(app)
     return app
-
-
-async def run_runner_bot(stop_event: asyncio.Event | None = None) -> None:
-    app = build_application()
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Runner Bot polling started.")
-
-    own_event = stop_event or asyncio.Event()
-    try:
-        await own_event.wait()
-    except asyncio.CancelledError:
-        pass
-    finally:
-        logger.info("Stopping Runner Bot...")
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
-        logger.info("Runner Bot stopped.")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(run_runner_bot())
