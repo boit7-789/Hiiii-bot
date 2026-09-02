@@ -83,7 +83,7 @@ def _is_owner(user_id: int) -> bool:
     if not owner_id:
         return False
     try:
-        return int(owner_id) == user_id
+        return str(owner_id) == str(user_id)
     except (TypeError, ValueError):
         return False
 
@@ -1080,6 +1080,7 @@ async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, pr
             except Exception:
                 pass
 
+        # 1. Send the leaderboard table chunk(s)
         for i in range(0, len(leaderboard), 100):
             chunk = leaderboard[i:i + 100]
             if i > 0:
@@ -1087,8 +1088,20 @@ async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, pr
             rich_md = _lb_rich_md(quiz_name, chunk, i + 1, total, sections)
             await send_rich_or_fallback(
                 lambda method, params: send_raw_api(ctx, method, params),
-                lambda text: safe_send_message(ctx, chat_id, text, reply_markup=dm_btn, **msg_kwargs),
+                lambda text: safe_send_message(ctx, chat_id, text, **msg_kwargs),
                 chat_id, rich_md, thread_id=end_tid,
+            )
+
+        # 2. Guarantee the DM Scorecard button is displayed directly below the table
+        if dm_btn:
+            await safe_send_message(
+                ctx,
+                chat_id,
+                "💾 <b>Want to receive your individual scorecard?</b>\n"
+                "Tap below to have your performance sent directly to your private chat:",
+                reply_markup=dm_btn,
+                parse_mode=ParseMode.HTML,
+                **msg_kwargs,
             )
 
         await _record_attempt_and_report(
