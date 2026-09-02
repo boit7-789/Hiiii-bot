@@ -8,12 +8,70 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterator, MutableMapping, Optional
 
 logger = logging.getLogger(__name__)
 
-# Temporary in-memory store for scorecard delivery (zero DB writes)
-temp_scorecards: dict[str, dict[int, dict]] = {}
+
+class ExpiringScorecardCache(MutableMapping[str, Dict[int, dict]]):
+    """
+    In-memory dictionary-like cache that automatically purges scorecard
+    sessions after a defined Time-To-Live (TTL). Prevents RAM growth on long uptimes.
+    """
+
+    def __init__(self, ttl_seconds: float = 7200.0) -> None:  # Default: 2 hours
+        self.ttl = ttl_seconds
+        # Structure: {quiz_id: {"created_at": float, "data": {user_id: scorecard_dict}}}
+        self._store: dict[str, dict[str, Any]] = {}
+
+    def prune(self) -> int:
+        """Removes all expired quiz scorecard records. Returns count of deleted entries."""
+        now = time.time()
+        expired_keys = [
+            qid for qid, item in self._store.items()
+            if now - item.get("created_at", 0) > self.ttl
+        ]
+        for qid in expired_keys:
+            self._store.pop(qid, None)
+        return len(expired_keys)
+
+    def __getitem__(self, key: str) -> Dict[int, dict]:
+        self.prune()
+        if key not in self._store:
+            raise KeyError(key)
+        item = self._store[key]
+        if time.time() - item["created_at"] > self.ttl:
+            del self._store[key]
+            raise KeyError(key)
+        return item["data"]
+
+    def __setitem__(self, key: str, value: Dict[int, dict]) -> None:
+        self.prune()
+        self._store[key] = {
+            "created_at": time.time(),
+            "data": value,
+        }
+
+    def __delitem__(self, key: str) -> None:
+        del self._store[key]
+
+    def __iter__(self) -> Iterator[str]:
+        self.prune()
+        return iter(self._store)
+
+    def __len__(self) -> int:
+        self.prune()
+        return len(self._store)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+# Temporary in-memory store for scorecard delivery with 2-hour auto-TTL
+temp_scorecards = ExpiringScorecardCache(ttl_seconds=7200.0)
 
 # Pending settings for quiz creation / setup wizard
 pending_quiz_settings: dict[int, dict[str, Any]] = {}
