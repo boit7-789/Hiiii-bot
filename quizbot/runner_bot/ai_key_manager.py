@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 from quizbot.shared import config
 
 logger = logging.getLogger(__name__)
@@ -55,16 +55,19 @@ class UniversalFreeAIEngine:
     async def _query_openai_compat(self, base_url: str, key: str, model: str, prompt: str, timeout: float = 7.0) -> str:
         """Universal handler for OpenAI-compatible REST endpoints."""
         from openai import AsyncOpenAI
-        client = AsyncOpenAI(base_url=base_url, api_key=key)
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            timeout=timeout,
-        )
-        content = resp.choices[0].message.content
-        if content:
-            return content.strip()
-        raise ValueError(f"Empty response from {model} at {base_url}")
+        client = AsyncOpenAI(base_url=base_url, api_key=key, timeout=timeout)
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=timeout,
+            )
+            content = resp.choices[0].message.content
+            if content:
+                return content.strip()
+            raise ValueError(f"Empty response from {model} at {base_url}")
+        finally:
+            await client.close()
 
     async def _query_gemini(self, key: str, prompt: str) -> str:
         """Native Google Gemini handler."""
@@ -76,7 +79,7 @@ class UniversalFreeAIEngine:
             lambda: client.models.generate_content(
                 model="gemini-2.5-flash",
                 contents=prompt,
-            )
+            ),
         )
         if resp and resp.text:
             return resp.text.strip()
@@ -201,5 +204,10 @@ class UniversalFreeAIEngine:
 
         return f"❌ All free AI services failed or timed out. Error: {last_error[:100]}"
 
+    def get_all_keys(self) -> List[str]:
+        """Backward-compatibility fallback method for legacy callers."""
+        return self.gemini_keys or self.groq_keys or ["dummy_key"]
+
 
 ai_engine = UniversalFreeAIEngine()
+ai_key_pool = ai_engine  # Alias to prevent ImportError in older imports
