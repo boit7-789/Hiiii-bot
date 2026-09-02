@@ -1257,7 +1257,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat_type = update.message.chat.type
         is_anon = _is_anon_admin(update.message)
         user_id = update.message.from_user.id if update.message.from_user else None
-        
+
         # Detect exact command invoked (strip / and @botname)
         raw_cmd = (update.message.text or "").split()[0].lstrip("/")
         cmd_invoked = raw_cmd.split("@")[0].lower()
@@ -1277,7 +1277,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 qname = user_result["qname"]
                 acc = (corr / (corr + wrg) * 100) if (corr + wrg) else 0
 
-               msg = (
+                msg = (
                     f"📋 <b>Your Quiz Result: {qname}</b>\n\n"
                     f"👤 <b>Student:</b> {update.message.from_user.first_name}\n"
                     f"📊 <b>Total Questions:</b> {tot}\n"
