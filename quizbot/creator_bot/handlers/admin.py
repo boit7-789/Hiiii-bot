@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import platform
+import sys
+import time
 
 from pyrogram import Client, filters
 from pyrogram.handlers import CallbackQueryHandler, MessageHandler
@@ -12,13 +15,19 @@ from pyrogram.types import (
     Message,
 )
 
-from quizbot.database import UserRepository, get_db
+from quizbot.database import (
+    AttemptRepository,
+    QuizRepository,
+    UserRepository,
+    get_db,
+)
 from quizbot.shared import config
 from quizbot.shared.utils import is_premium_user
 
 logger = logging.getLogger(__name__)
 
 OWNER_CONTACT_URL = "https://t.me/cuetchampion"
+BOT_START_TIME = time.time()
 
 
 def _is_owner(user_id: int) -> bool:
@@ -66,7 +75,6 @@ async def send_help_reference(c: Client, chat_id: int, user_id: int) -> None:
         await send_restricted_notice(c, chat_id, user_id)
         return
 
-    # Message 1: Creator Reference
     creator_text = (
         "🛠 **Quiz Creator Bot — Command Reference**\n\n"
         "**Creation & Management:**\n"
@@ -74,7 +82,7 @@ async def send_help_reference(c: Client, chat_id: int, user_id: int) -> None:
         "• `/done` — Save and finish current quiz\n"
         "• `/cancel` — Cancel quiz creation in progress\n"
         "• `/myquizzes` — View and edit your quiz library\n"
-        "• `/edit` — Modify questions, options, and timer\n"
+        "• `/edit <quiz_id>` — Modify questions, options, and timer\n"
         "• `/import` — Import quiz files (TXT, JSON)\n"
         "• `/batch` — Group multiple quizzes into batches\n"
         "• `/limit` — Check daily command quota\n"
@@ -90,7 +98,6 @@ async def send_help_reference(c: Client, chat_id: int, user_id: int) -> None:
             "• `/stats` — View system and database statistics\n"
         )
 
-   # --- Message 2: Runner Reference ---
     runner_text = (
         "🎮 **Quiz Runner Bot — Command Reference**\n\n"
         "**Playing Quizzes (Groups & Channels):**\n"
@@ -175,12 +182,121 @@ async def help_cmd(c: Client, m: Message) -> None:
     await send_help_reference(c, m.chat.id, user.id)
 
 
+async def stats_cmd(c: Client, m: Message) -> None:
+    """Handle /stats command — system and database breakdown."""
+    user = m.from_user
+    if not user or not _is_owner(user.id):
+        return
+
+    status_msg = await m.reply_text("📊 Gathering system and database statistics...")
+
+    try:
+        db = get_db()
+        user_count = 0
+        quiz_count = 0
+        attempt_count = 0
+
+        if db:
+            user_repo = UserRepository(db)
+            quiz_repo = QuizRepository(db)
+            attempt_repo = AttemptRepository(db)
+
+            user_count = await user_repo.count() if hasattr(user_repo, "count") else len(await user_repo.get_all() if hasattr(user_repo, "get_all") else [])
+            quiz_count = await quiz_repo.count() if hasattr(quiz_repo, "count") else len(await quiz_repo.get_all() if hasattr(quiz_repo, "get_all") else [])
+            attempt_count = await attempt_repo.count() if hasattr(attempt_repo, "count") else 0
+
+        # Calculate Uptime
+        uptime_seconds = int(time.time() - BOT_START_TIME)
+        days, remainder = divmod(uptime_seconds, 86400)
+        hours, remainder = divmod(remainder, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m {seconds}s" if days else f"{hours}h {minutes}m {seconds}s"
+
+        stats_text = (
+            "📊 **System & Database Statistics**\n\n"
+            "🤖 **Bot Engine Status:**\n"
+            f"• **Status:** 🟢 Online & Running\n"
+            f"• **Uptime:** `{uptime_str}`\n"
+            f"• **Python:** `{platform.python_version()}`\n"
+            f"• **OS:** `{platform.system()} {platform.release()}`\n\n"
+            "🗄️ **Database Metrics:**\n"
+            f"• **Total Registered Users:** `{user_count}`\n"
+            f"• **Total Quizzes Created:** `{quiz_count}`\n"
+            f"• **Total Completed Attempts:** `{attempt_count}`\n"
+            f"• **Database Engine:** MongoDB Atlas"
+        )
+
+        await status_msg.edit_text(stats_text)
+    except Exception as e:
+        logger.exception("Failed to collect stats: %s", e)
+        await status_msg.edit_text(f"❌ Error collecting statistics: {e}")
+
+
+async def admin_panel_cmd(c: Client, m: Message) -> None:
+    """Handle /admin command — owner dashboard."""
+    user = m.from_user
+    if not user or not _is_owner(user.id):
+        return
+
+    text = (
+        "👑 **Owner Control Panel**\n\n"
+        "Manage users, system status, and bot-wide announcements.\n\n"
+        "**Available Commands:**\n"
+        "• `/stats` — View live database & server status\n"
+        "• `/auth <user_id> <days>` — Grant user access\n"
+        "• `/removeuser <user_id>` — Revoke user access\n"
+        "• `/broadcast <message>` — Send announcement to all users"
+    )
+    await m.reply_text(text)
+
+
+async def broadcast_cmd(c: Client, m: Message) -> None:
+    """Handle /broadcast <message> to send updates to all users."""
+    user = m.from_user
+    if not user or not _is_owner(user.id):
+        return
+
+    parts = m.text.split(None, 1)
+    if len(parts) < 2:
+        await m.reply_text("Usage: `/broadcast <message to send>`")
+        return
+
+    broadcast_text = parts[1]
+    db = get_db()
+    if not db:
+        await m.reply_text("❌ Database not connected.")
+        return
+
+    status_msg = await m.reply_text("📢 Starting broadcast...")
+    user_repo = UserRepository(db)
+    users = await user_repo.get_all() if hasattr(user_repo, "get_all") else []
+
+    success = 0
+    failed = 0
+
+    for u in users:
+        uid = u.get("user_id") or u.get("id")
+        if not uid:
+            continue
+        try:
+            await c.send_message(uid, broadcast_text)
+            success += 1
+            await asyncio.sleep(0.05)
+        except Exception:
+            failed += 1
+
+    await status_msg.edit_text(
+        f"📢 **Broadcast Complete!**\n\n"
+        f"✅ Delivered: `{success}`\n"
+        f"❌ Failed: `{failed}`"
+    )
+
+
 async def start_button_callbacks(c: Client, q: CallbackQuery) -> None:
     """Handle callback button clicks from the /start message."""
     data = q.data or ""
     await q.answer()
 
-    # q.from_user is the person clicking the button
     user_id = q.from_user.id
     chat_id = q.message.chat.id if q.message else user_id
 
@@ -195,5 +311,8 @@ async def start_button_callbacks(c: Client, q: CallbackQuery) -> None:
 def register(app: Client) -> None:
     app.add_handler(MessageHandler(start_cmd, filters.command("start") & filters.private))
     app.add_handler(MessageHandler(help_cmd, filters.command("help") & filters.private))
+    app.add_handler(MessageHandler(stats_cmd, filters.command("stats") & filters.private))
+    app.add_handler(MessageHandler(admin_panel_cmd, filters.command("admin") & filters.private))
+    app.add_handler(MessageHandler(broadcast_cmd, filters.command("broadcast") & filters.private))
     app.add_handler(CallbackQueryHandler(start_button_callbacks, filters.regex(r"^cb_start_")))
     logger.info("Creator bot admin & gatekeeper handlers successfully registered.")
