@@ -1,88 +1,77 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
 import asyncio
 import logging
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update
-from telegram.ext import Application
+from telegram.constants import ChatType
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    TypeHandler,
+)
 
 from quizbot.shared import config
-
+from quizbot.shared.utils import is_premium_user
 from . import handlers
-from .handlers.admin import watchdog_loop
-from .handlers.scheduling import init_schedule_manager
-from .state import tasks
 
 logger = logging.getLogger(__name__)
 
-scheduler = AsyncIOScheduler()
+
+async def private_chat_guard(update: Update, context) -> None:
+    """Blocks unauthorized users from interacting with the Runner Bot in private DMs.
+    Groups and supergroups remain untouched so quizzes can still run there."""
+    msg = update.effective_message
+    user = update.effective_user
+
+    # If it's a private chat, verify authorization
+    if msg and msg.chat and msg.chat.type == ChatType.PRIVATE:
+        if user and not await is_premium_user(user.id):
+            # Stop handling this update immediately (silences all commands in DM)
+            raise ApplicationHandlerStop
 
 
-async def post_init(application: Application) -> None:
-    """Runs once after Application.initialize() -- starts the scheduler and
-    the background watchdog task."""
-    init_schedule_manager(scheduler)
-    scheduler.start()
-    tasks.spawn(watchdog_loop(), name="watchdog")
-    logger.info("Runner Bot post_init complete (scheduler + watchdog started).")
-
-
-async def post_shutdown(application: Application) -> None:
-    """Runs once during Application.shutdown() -- tears down the scheduler."""
-    scheduler.shutdown(wait=False)
-    logger.info("Runner Bot post_shutdown complete.")
+from telegram.ext import ApplicationHandlerStop
 
 
 def build_application() -> Application:
-    """Construct the PTB Application with every handler registered."""
-    application = (
-        Application.builder()
+    """Construct the Runner Bot's python-telegram-bot Application."""
+    app = (
+        ApplicationBuilder()
         .token(config.RUNNER_BOT_TOKEN)
         .concurrent_updates(True)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
         .build()
     )
-    handlers.register(application)
-    return application
+
+    # Group -1 runs BEFORE any command handlers (0)
+    # This immediately drops unauthorized commands in private chats
+    app.add_handler(TypeHandler(Update, private_chat_guard), group=-1)
+
+    handlers.register(app)
+    return app
 
 
-async def run_runner_bot() -> None:
-    """Run the Runner Bot non-blocking, as one of two concurrent asyncio
-    tasks sharing a single event loop with the Creator Bot.
+async def run_runner_bot(stop_event: asyncio.Event | None = None) -> None:
+    app = build_application()
 
-    Uses the manual PTB lifecycle (initialize/start/start_polling) instead
-    of `run_polling()`, which owns its own event loop and would block the
-    other bot from running alongside it in the same process.
-    """
-    application = build_application()
-
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(
-        allowed_updates=Update.ALL_TYPES,
-        drop_pending_updates=True,
-    )
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
     logger.info("Runner Bot polling started.")
 
+    own_event = stop_event or asyncio.Event()
     try:
-        # Block here until this task is cancelled by the launcher (run.py),
-        # which happens on SIGINT/SIGTERM or if the sibling bot task dies.
-        await asyncio.Future()
+        await own_event.wait()
+    except asyncio.CancelledError:
+        pass
     finally:
-        logger.info("Runner Bot shutting down...")
-        await application.updater.stop()
-        await application.stop()
-        await application.shutdown()
+        logger.info("Stopping Runner Bot...")
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        logger.info("Runner Bot stopped.")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(run_runner_bot())
