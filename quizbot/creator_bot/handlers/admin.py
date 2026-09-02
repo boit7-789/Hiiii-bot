@@ -127,6 +127,13 @@ async def start_cmd(c: Client, m: Message) -> None:
     if user is None:
         return
 
+    # Ignore scorecard deep-links completely so students only receive their scorecards
+    text_parts = (m.text or "").strip().split()
+    if len(text_parts) > 1 and (
+        text_parts[1].startswith("dmscore_") or text_parts[1].startswith("score_")
+    ):
+        return
+
     is_adm = _is_owner(user.id)
     try:
         authorized = is_adm or await is_premium_user(user.id)
