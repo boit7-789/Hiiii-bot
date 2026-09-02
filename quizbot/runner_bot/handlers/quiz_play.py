@@ -1445,6 +1445,9 @@ async def group_help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         "• <code>/stop</code> — End current quiz immediately\n"
         "• <code>/slow</code> | <code>/normal</code> | <code>/fast</code> — Adjust timers\n"
         "• <code>/leaderboard</code> — Display current scores\n\n"
+        "<b>Student Help & Doubts:</b>\n"
+        "• <code>/aidoubt &lt;question&gt;</code> — Ask any academic doubt\n"
+        "• Reply to any poll/question with <code>/aidoubt</code> to get an explanation\n\n"
         "<i>To create or manage quizzes, message the bot in private DM.</i>"
     )
     await safe_send_message(ctx, update.message.chat_id, text, parse_mode=ParseMode.HTML)
