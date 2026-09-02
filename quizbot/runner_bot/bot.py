@@ -28,14 +28,14 @@ def _is_owner(user_id: int) -> bool:
     if not owner_id:
         return False
     try:
-        return int(owner_id) == user_id
+        return str(owner_id) == str(user_id)
     except (TypeError, ValueError):
         return False
 
 
 async def runner_gatekeeper(update: Update, context) -> None:
     """1. In DMs: Creator Bot handles management and bare /start.
-       Runner Bot only processes /quiz or active poll interactions for authorized users.
+       Runner Bot processes /quiz, DM scorecards, or active poll interactions for authorized users.
     2. In Groups: Students can participate in polls freely.
     """
     msg = update.effective_message
@@ -46,19 +46,23 @@ async def runner_gatekeeper(update: Update, context) -> None:
         if not user:
             raise ApplicationHandlerStop
 
+        text = (msg.text or "").strip()
+        parts = text.split()
+        cmd = parts[0].lower() if parts else ""
+
+        # Allow ANY student to receive their individual scorecard in DM without auth checks
+        if cmd == "/start" and len(parts) > 1 and parts[1].startswith("dmscore_"):
+            return
+
         is_adm = _is_owner(user.id)
         try:
             is_auth = is_adm or await is_premium_user(user.id)
         except Exception:
             is_auth = is_adm
 
-        # Mute Runner Bot completely for unauthorized users in DMs
+        # Mute Runner Bot completely for unauthorized users in DMs for standard commands
         if not is_auth:
             raise ApplicationHandlerStop
-
-        text = (msg.text or "").strip()
-        parts = text.split()
-        cmd = parts[0].lower() if parts else ""
 
         # Let Creator Bot handle bare /start
         if cmd == "/start" and len(parts) == 1:
