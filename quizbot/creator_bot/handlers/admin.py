@@ -40,7 +40,7 @@ def _is_owner(user_id: int) -> bool:
     if not owner_id:
         return False
     try:
-        return int(owner_id) == user_id
+        return str(owner_id) == str(user_id)
     except (TypeError, ValueError):
         return False
 
@@ -201,11 +201,19 @@ async def stats_cmd(c: Client, m: Message) -> None:
             quiz_repo = QuizRepository(db)
             attempt_repo = AttemptRepository(db)
 
-            user_count = await user_repo.count() if hasattr(user_repo, "count") else len(await user_repo.get_all() if hasattr(user_repo, "get_all") else [])
-            quiz_count = await quiz_repo.count() if hasattr(quiz_repo, "count") else len(await quiz_repo.get_all() if hasattr(quiz_repo, "get_all") else [])
-            attempt_count = await attempt_repo.count() if hasattr(attempt_repo, "count") else 0
+            if hasattr(user_repo, "count"):
+                user_count = await user_repo.count()
+            elif hasattr(user_repo, "get_all"):
+                user_count = len(await user_repo.get_all())
 
-        # Calculate Uptime
+            if hasattr(quiz_repo, "count"):
+                quiz_count = await quiz_repo.count()
+            elif hasattr(quiz_repo, "get_all"):
+                quiz_count = len(await quiz_repo.get_all())
+
+            if hasattr(attempt_repo, "count"):
+                attempt_count = await attempt_repo.count()
+
         uptime_seconds = int(time.time() - BOT_START_TIME)
         days, remainder = divmod(uptime_seconds, 86400)
         hours, remainder = divmod(remainder, 3600)
@@ -215,7 +223,7 @@ async def stats_cmd(c: Client, m: Message) -> None:
         stats_text = (
             "📊 **System & Database Statistics**\n\n"
             "🤖 **Bot Engine Status:**\n"
-            f"• **Status:** 🟢 Online & Running\n"
+            "• **Status:** 🟢 Online & Running\n"
             f"• **Uptime:** `{uptime_str}`\n"
             f"• **Python:** `{platform.python_version()}`\n"
             f"• **OS:** `{platform.system()} {platform.release()}`\n\n"
@@ -223,7 +231,7 @@ async def stats_cmd(c: Client, m: Message) -> None:
             f"• **Total Registered Users:** `{user_count}`\n"
             f"• **Total Quizzes Created:** `{quiz_count}`\n"
             f"• **Total Completed Attempts:** `{attempt_count}`\n"
-            f"• **Database Engine:** MongoDB Atlas"
+            "• **Database Engine:** MongoDB Atlas"
         )
 
         await status_msg.edit_text(stats_text)
@@ -251,45 +259,97 @@ async def admin_panel_cmd(c: Client, m: Message) -> None:
 
 
 async def broadcast_cmd(c: Client, m: Message) -> None:
-    """Handle /broadcast <message> to send updates to all users."""
+    """Handle /broadcast <message> to send updates to all registered users."""
     user = m.from_user
-    if not user or not _is_owner(user.id):
+    if not user:
+        return
+
+    if not _is_owner(user.id):
+        await m.reply_text("🚫 This command is restricted to the bot owner.")
         return
 
     parts = m.text.split(None, 1)
     if len(parts) < 2:
-        await m.reply_text("Usage: `/broadcast <message to send>`")
+        await m.reply_text(
+            "📢 **Broadcast Usage:**\n\n"
+            "• `/broadcast <your message here>`\n\n"
+            "Example: `/broadcast Hello everyone, a new quiz has been posted!`"
+        )
         return
 
-    broadcast_text = parts[1]
+    broadcast_text = parts[1].strip()
     db = get_db()
-    if not db:
+    if db is None:
         await m.reply_text("❌ Database not connected.")
         return
 
-    status_msg = await m.reply_text("📢 Starting broadcast...")
-    user_repo = UserRepository(db)
-    users = await user_repo.get_all() if hasattr(user_repo, "get_all") else []
+    status_msg = await m.reply_text("📢 Fetching users and preparing broadcast...")
+
+    user_ids: set[int] = set()
+
+    try:
+        if hasattr(db, "users"):
+            cursor = db.users.find({}, {"_id": 0, "user_id": 1, "id": 1})
+            async for doc in cursor:
+                uid = doc.get("user_id") or doc.get("id")
+                if uid:
+                    try:
+                        user_ids.add(int(uid))
+                    except (ValueError, TypeError):
+                        pass
+
+        if hasattr(db, "quizzes"):
+            cursor = db.quizzes.find({}, {"_id": 0, "creator_id": 1})
+            async for doc in cursor:
+                cid = doc.get("creator_id")
+                if cid:
+                    try:
+                        user_ids.add(int(cid))
+                    except (ValueError, TypeError):
+                        pass
+    except Exception as e:
+        logger.error("Error querying database during broadcast: %s", e)
+        try:
+            user_repo = UserRepository(db)
+            if hasattr(user_repo, "get_all"):
+                all_users = await user_repo.get_all()
+                for u in all_users:
+                    uid = u.get("user_id") or u.get("id")
+                    if uid:
+                        user_ids.add(int(uid))
+        except Exception as inner_e:
+            logger.error("Fallback repository query failed: %s", inner_e)
+
+    if not user_ids:
+        await status_msg.edit_text("⚠️ No registered users found in the database to broadcast to.")
+        return
+
+    await status_msg.edit_text(f"📢 Sending broadcast to **{len(user_ids)}** user(s)...")
 
     success = 0
     failed = 0
+    blocked = 0
 
-    for u in users:
-        uid = u.get("user_id") or u.get("id")
-        if not uid:
-            continue
+    for target_id in user_ids:
         try:
-            await c.send_message(uid, broadcast_text)
+            await c.send_message(chat_id=target_id, text=broadcast_text)
             success += 1
             await asyncio.sleep(0.05)
-        except Exception:
-            failed += 1
+        except Exception as send_err:
+            err_str = str(send_err).lower()
+            if "blocked" in err_str or "user_deactivated" in err_str:
+                blocked += 1
+            else:
+                failed += 1
 
-    await status_msg.edit_text(
-        f"📢 **Broadcast Complete!**\n\n"
-        f"✅ Delivered: `{success}`\n"
-        f"❌ Failed: `{failed}`"
+    summary_text = (
+        f"📢 **Broadcast Complete**\n\n"
+        f"👥 **Total Targets:** `{len(user_ids)}`\n"
+        f"✅ **Delivered:** `{success}`\n"
+        f"🚫 **Blocked/Deleted:** `{blocked}`\n"
+        f"❌ **Failed:** `{failed}`"
     )
+    await status_msg.edit_text(summary_text)
 
 
 async def start_button_callbacks(c: Client, q: CallbackQuery) -> None:
