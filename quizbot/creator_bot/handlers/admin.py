@@ -1,8 +1,6 @@
 """
 Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
+Admin, Start, Help, and Limit Handlers
 """
 
 from __future__ import annotations
@@ -18,54 +16,45 @@ from pyrogram.types import (
     Message,
 )
 
-from quizbot.database import (
-    QuizRepository,
-    UserRepository,
-    get_db,
-)
+from quizbot.database import QuizRepository, UserRepository, get_db
 from quizbot.shared import config
-from quizbot.shared.utils import is_premium_user
-
 from .. import keyboards, state
-from ..ratelimit import ratelimit
-from ..subscribe_gate import subscribe_gate
 
 logger = logging.getLogger(__name__)
 
 
 def _is_owner(uid: int) -> bool:
-    return uid == config.OWNER_ID or uid in config.ADMIN_IDS
+    return uid == config.OWNER_ID or (config.ADMIN_IDS and uid in config.ADMIN_IDS)
 
 
-@ratelimit("default")
-async def start_cmd(c: Client, m: Message) -> None:
-    if await subscribe_gate(c, m):
-        return
+async def start_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     user = m.from_user
     if user is None:
         return
 
-    # Track user in database
+    logger.info("Received /start from user_id: %s", user.id)
+
+    # Track user in database safely
     try:
         user_repo = UserRepository(get_db())
         await user_repo.ensure_user(user.id, user.username or "", user.first_name or "")
-    except Exception:
-        logger.debug("Failed to record user %s in db", user.id, exc_info=True)
+    except Exception as e:
+        logger.warning("Failed to record user in db: %s", e)
 
     text = (
         f"👋 Hello, **{user.first_name}**!\n\n"
         "Welcome to the **Advance Quiz Bot** Creator panel.\n\n"
-        "Here you can create, edit, manage, and share quizzes with your students or group members.\n\n"
         "Use the menu buttons below to get started:"
     )
     kb = keyboards.start_menu_keyboard(is_admin=_is_owner(user.id))
     await m.reply(text, reply_markup=kb)
 
 
-@ratelimit("default")
-async def help_cmd(c: Client, m: Message) -> None:
-    if await subscribe_gate(c, m):
+async def help_cmd(c: Client, m: Message, *args, **kwargs) -> None:
+    user = m.from_user
+    if user is None:
         return
+
     text = (
         "📚 **Quiz Creator Bot Commands:**\n\n"
         "• /create — Start interactive quiz creation\n"
@@ -73,29 +62,27 @@ async def help_cmd(c: Client, m: Message) -> None:
         "• /cancel — Cancel current quiz creation\n"
         "• /myquizzes — View and manage your created quizzes\n"
         "• /edit — Edit an existing quiz\n"
-        "• /import — Import questions from files (TXT/CSV/JSON/PDF)\n"
+        "• /import — Import questions from files\n"
         "• /batch — Manage quiz batches\n"
         "• /limit — Check your command quota\n"
     )
-    if _is_owner(m.from_user.id):
+    if _is_owner(user.id):
         text += (
             "\n👑 **Owner / Admin Commands:**\n"
             "• /admin — Open admin control panel\n"
-            "• /auth <id> <duration> <unit> — Grant premium access\n"
-            "• /removeuser <id> — Revoke premium access\n"
-            "• /broadcast — Broadcast message to all users\n"
+            "• /auth <id> <days> — Grant access\n"
+            "• /removeuser <id> — Revoke access\n"
+            "• /broadcast — Broadcast message to users\n"
             "• /stats — View bot statistics\n"
         )
     await m.reply(text)
 
 
-@ratelimit("default")
-async def limit_cmd(c: Client, m: Message) -> None:
+async def limit_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     user = m.from_user
     if user is None:
         return
 
-    # Unlimited for Owner and Admins
     if _is_owner(user.id):
         await m.reply(
             "👑 **Admin / Owner Status:**\n\n"
@@ -123,10 +110,9 @@ async def limit_cmd(c: Client, m: Message) -> None:
     await m.reply("\n".join(lines))
 
 
-@ratelimit("default")
-async def admin_panel_cmd(c: Client, m: Message) -> None:
-    uid = m.from_user.id
-    if not _is_owner(uid):
+async def admin_panel_cmd(c: Client, m: Message, *args, **kwargs) -> None:
+    user = m.from_user
+    if user is None or not _is_owner(user.id):
         await m.reply("⛔ This command is restricted to the Bot Owner and Admins.")
         return
 
@@ -146,8 +132,8 @@ async def admin_panel_cmd(c: Client, m: Message) -> None:
 
 
 async def admin_callback(c: Client, cq: CallbackQuery) -> None:
-    uid = cq.from_user.id
-    if not _is_owner(uid):
+    user = cq.from_user
+    if user is None or not _is_owner(user.id):
         await cq.answer("Owner only.", show_alert=True)
         return
 
@@ -209,9 +195,9 @@ async def admin_callback(c: Client, cq: CallbackQuery) -> None:
         await cq.answer()
 
 
-@ratelimit("default")
-async def broadcast_cmd(c: Client, m: Message) -> None:
-    if m.from_user is None or not _is_owner(m.from_user.id):
+async def broadcast_cmd(c: Client, m: Message, *args, **kwargs) -> None:
+    user = m.from_user
+    if user is None or not _is_owner(user.id):
         return
 
     reply = m.reply_to_message
@@ -243,9 +229,9 @@ async def broadcast_cmd(c: Client, m: Message) -> None:
     await status_msg.edit_text(f"Broadcast complete.\nSent: {sent}\nFailed/Blocked: {failed}")
 
 
-@ratelimit("default")
-async def stats_cmd(c: Client, m: Message) -> None:
-    if m.from_user is None or not _is_owner(m.from_user.id):
+async def stats_cmd(c: Client, m: Message, *args, **kwargs) -> None:
+    user = m.from_user
+    if user is None or not _is_owner(user.id):
         return
 
     repo = UserRepository(get_db())
