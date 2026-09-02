@@ -19,8 +19,9 @@ temp_scorecards: dict[str, dict[int, dict]] = {}
 # Pending settings for quiz creation / setup wizard
 pending_quiz_settings: dict[int, dict[str, Any]] = {}
 
-# Active AI provider fallback state
+# Active AI provider fallback state & ongoing AI sessions
 last_working_ai: dict[str, Any] = {}
+AI_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
 
 
 class SessionManager:
