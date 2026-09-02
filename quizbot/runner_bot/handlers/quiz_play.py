@@ -1040,6 +1040,40 @@ async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, pr
 
         leaderboard.sort(key=lambda x: (x["score"], -x["total_time"]), reverse=True)
 
+        # Cache scorecard in memory only (Zero DB write)
+        from ..state import temp_scorecards
+        temp_scorecards[quiz_id] = {}
+        for entry in leaderboard:
+            uid = entry.get("user_id")
+            if uid:
+                m_val, s_val = divmod(int(entry.get("total_time", 0)), 60)
+                temp_scorecards[quiz_id][uid] = {
+                    "qname": quiz_name,
+                    "correct": entry.get("correct", 0),
+                    "wrong": entry.get("wrong", 0),
+                    "score": entry.get("score", 0.0),
+                    "total": total,
+                    "time_str": f"{m_val}m {s_val}s",
+                }
+
+        # Dynamically resolve bot username from runtime context
+        bot_username = ctx.bot.username
+        if not bot_username:
+            try:
+                me_bot = await ctx.bot.get_me()
+                bot_username = me_bot.username or ""
+            except Exception:
+                bot_username = ""
+
+        dm_btn = None
+        if bot_username:
+            dm_btn = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "📩 Send My Marks in DM",
+                    url=f"https://t.me/{bot_username}?start=dmscore_{quiz_id}"
+                )
+            ]])
+
         if placeholder:
             try:
                 await placeholder.delete()
@@ -1053,7 +1087,7 @@ async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, pr
             rich_md = _lb_rich_md(quiz_name, chunk, i + 1, total, sections)
             await send_rich_or_fallback(
                 lambda method, params: send_raw_api(ctx, method, params),
-                lambda text: safe_send_message(ctx, chat_id, text, **msg_kwargs),
+                lambda text: safe_send_message(ctx, chat_id, text, reply_markup=dm_btn, **msg_kwargs),
                 chat_id, rich_md, thread_id=end_tid,
             )
 
@@ -1200,7 +1234,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/quiz [quiz_id] [skip] or /start [quiz_id] [skip]
     Launches the quiz setup wizard or displays the quiz launcher panel in DMs/groups."""
     from .setup_wizard import show_correct_mark_prompt
-    from ..state import pending_quiz_settings
+    from ..state import pending_quiz_settings, temp_scorecards
 
     if not update.message:
         return
@@ -1215,12 +1249,47 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         raw_cmd = (update.message.text or "").split()[0].lstrip("/")
         cmd_invoked = raw_cmd.split("@")[0].lower()
 
-        # 1. Plain /start with no arguments in private DM: ignore it completely
+        # 1. Temporary DM Scorecard Delivery Handler (In-memory, Zero DB writes)
+        if chat_type == ChatType.PRIVATE and ctx.args and ctx.args[0].startswith("dmscore_"):
+            target_qid = ctx.args[0].replace("dmscore_", "").strip()
+            quiz_scores = temp_scorecards.get(target_qid, {})
+            user_result = quiz_scores.get(user_id) if user_id else None
+
+            if user_result:
+                corr = user_result["correct"]
+                wrg = user_result["wrong"]
+                tot = user_result["total"]
+                sc = user_result["score"]
+                t_str = user_result["time_str"]
+                qname = user_result["qname"]
+                acc = (corr / (corr + wrg) * 100) if (corr + wrg) else 0
+
+                msg = (
+                    f"📋 <b>Your Quiz Result: {qname}</b>\n\n"
+                    f"👤 <b>Student:</b> {update.message.from_user.first_name}\n"
+                    f"📊 <b>Total Questions:</b> {tot}\n"
+                    f"⏱️ <b>Time Taken:</b> {t_str}\n\n"
+                    f"✅ <b>Correct Answers:</b> {corr}\n"
+                    f"❌ <b>Wrong Answers:</b> {wrg}\n"
+                    f"🎯 <b>Your Score:</b> {sc:.2f}\n"
+                    f"📈 <b>Accuracy:</b> {acc:.1f}%\n\n"
+                    f"<i>Note: This is a temporary report sent privately to your DM.</i>"
+                )
+            else:
+                msg = (
+                    "⚠️ <b>Result Not Found</b>\n\n"
+                    "Either you did not participate in this quiz session, or the temporary session has ended."
+                )
+
+            await safe_send_message(ctx, chat_id, msg, parse_mode=ParseMode.HTML)
+            return
+
+        # 2. Plain /start with no arguments in private DM: ignore it completely
         # (This lets Creator Bot handle your DM welcome card without interference)
         if chat_type == ChatType.PRIVATE and cmd_invoked == "start" and not ctx.args:
             return
 
-        # 2. Plain /quiz with NO arguments: show instructions in both DM and Group
+        # 3. Plain /quiz with NO arguments: show instructions in both DM and Group
         if not ctx.args:
             launcher_text = (
                 "🎯 <b>Quiz Launcher Hub</b>\n\n"
@@ -1236,7 +1305,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_send_message(ctx, chat_id, launcher_text, parse_mode=ParseMode.HTML)
             return
 
-        # 3. Anonymous Admin check in groups
+        # 4. Anonymous Admin check in groups
         if is_anon and chat_type != ChatType.PRIVATE:
             qid_arg = ctx.args[0] if ctx.args else ""
             btn = InlineKeyboardMarkup([[
@@ -1249,7 +1318,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        # 4. Authorization check for launching quizzes
+        # 5. Authorization check for launching quizzes
         is_adm = _is_owner(user_id) if user_id else False
         is_auth = is_adm or (await is_premium_user(user_id) if user_id else False)
 
