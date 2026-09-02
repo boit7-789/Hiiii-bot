@@ -74,32 +74,64 @@ async def help_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     if user is None:
         return
 
-    # Block unauthorized users
+    # Gate: Block unauthorized users immediately
     if not await is_premium_user(user.id):
         await send_restricted_notice(m, user.id)
         return
 
-    text = (
-        "📚 **Quiz Creator Bot Commands:**\n\n"
-        "• /create — Start interactive quiz creation\n"
-        "• /done — Finish and save a quiz in progress\n"
-        "• /cancel — Cancel current quiz creation\n"
-        "• /myquizzes — View and manage your created quizzes\n"
-        "• /edit — Edit an existing quiz\n"
-        "• /import — Import questions from files\n"
-        "• /batch — Manage quiz batches\n"
-        "• /limit — Check your command quota\n"
+    # --- Message 1: Creator Bot Reference ---
+    creator_text = (
+        "🛠 **Quiz Creator Bot — Command Reference**\n\n"
+        "**Creation & Management**\n"
+        "• `/create` — Start interactive quiz creation\n"
+        "• `/done` — Finish and save current quiz\n"
+        "• `/cancel` — Cancel quiz creation in progress\n"
+        "• `/myquizzes` — View and manage your created quizzes\n"
+        "• `/edit` — Edit questions, timers, or options\n"
+        "• `/import` — Import questions from files\n\n"
+        "**Batches**\n"
+        "• `/batch`, `/createbatch`, `/searchbatch <term>`\n\n"
+        "**Account & Limits**\n"
+        "• `/limit` — View current command quotas\n"
+        "• `/settings` — Creator settings\n"
+        "• `/features` — Feature overview\n"
     )
+
     if _is_owner(user.id):
-        text += (
-            "\n👑 **Owner / Admin Commands:**\n"
-            "• /admin — Open admin control panel\n"
-            "• /auth <id> <days> — Grant access\n"
-            "• /removeuser <id> — Revoke access\n"
-            "• /broadcast — Broadcast message to users\n"
-            "• /stats — View bot statistics\n"
+        creator_text += (
+            "\n👑 **Owner Controls**\n"
+            "• `/admin` — Open admin dashboard\n"
+            "• `/auth <id> <days>` — Grant access to user\n"
+            "• `/removeuser <id>` — Revoke access from user\n"
+            "• `/broadcast <msg>` — Broadcast announcement\n"
+            "• `/stats` — View bot & database stats\n"
         )
-    await m.reply(text)
+
+    # --- Message 2: Runner Bot Reference ---
+    runner_text = (
+        "📖 **Runner Bot — Command Reference**\n\n"
+        "**Playing quizzes**\n"
+        "• `/start <quiz_id> [skip]` — launch a quiz\n"
+        "• `/pause`, `/resume`, `/stop` — control the running quiz\n"
+        "• `/slow`, `/fast`, `/normal` — adjust the per-question timer\n"
+        "• `/leaderboard` — show a live leaderboard mid-quiz\n\n"
+        "**Other quiz modes**\n"
+        "• `/pollquiz <quiz_id>`, `/pollstop` — non-expiring poll mode\n"
+        "• `/mix <count> <id1> <id2> ...` — combine quizzes\n"
+        "• `/aiquiz <topic>` — AI-generated quiz\n"
+        "• `/pdfquiz` — reply to a PDF to generate a quiz from it\n\n"
+        "**Reports & settings**\n"
+        "• `/html`, `/pdf` — toggle report generation for this chat\n"
+        "• `/trans <lang>` — live question translation\n"
+        "• `/schedule`, `/viewschedule`, `/cancelschedule` — schedule a quiz\n"
+    )
+
+    # Send Message 1 (Creator panel)
+    await m.reply(creator_text)
+    # Brief pause to ensure correct ordering in chat
+    await asyncio.sleep(0.3)
+    # Send Message 2 (Runner reference)
+    await m.reply(runner_text)
 
 
 async def limit_cmd(c: Client, m: Message, *args, **kwargs) -> None:
