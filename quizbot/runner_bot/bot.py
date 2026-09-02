@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 
 def _is_owner(user_id: int) -> bool:
-    owner_id = getattr(config, "OWNER_ID", None) or getattr(config, "ADMIN_USER_ID", None)
+    owner_id = (
+        getattr(config, "OWNER_ID", None)
+        or getattr(config, "ADMIN_USER_ID", None)
+        or getattr(config, "OWNER_USER_ID", None)
+    )
+    if not owner_id:
+        return False
     try:
         return int(owner_id) == user_id
     except (TypeError, ValueError):
@@ -28,31 +34,38 @@ def _is_owner(user_id: int) -> bool:
 
 
 async def runner_gatekeeper(update: Update, context) -> None:
-    """1. Private DMs: Creator bot handles general commands. Runner only allows
-       authorized users to play personal quizzes (/quiz <id>).
-    2. Groups: Students can vote on polls freely. Gated commands are checked
-       inside each handler via _require_admin / is_premium_user.
+    """1. In DMs: Creator Bot handles management and bare /start.
+       Runner Bot only processes /quiz or active poll interactions for authorized users.
+    2. In Groups: Students can participate in polls freely.
     """
     msg = update.effective_message
     user = update.effective_user
 
-    # Handle Private DM restrictions
+    # Handle private DM restrictions
     if msg and msg.chat and msg.chat.type == ChatType.PRIVATE:
         if not user:
             raise ApplicationHandlerStop
 
         is_adm = _is_owner(user.id)
-        is_auth = is_adm or await is_premium_user(user.id)
+        try:
+            is_auth = is_adm or await is_premium_user(user.id)
+        except Exception:
+            is_auth = is_adm
 
-        # Drop unauthorized users entirely in DM (Creator Bot will show access card)
+        # Mute Runner Bot completely for unauthorized users in DMs
         if not is_auth:
             raise ApplicationHandlerStop
 
         text = (msg.text or "").strip()
-        cmd = text.split()[0].lower() if text.startswith("/") else ""
+        parts = text.split()
+        cmd = parts[0].lower() if parts else ""
 
-        # Mute Creator-only commands so Runner Bot never duplicates responses
-        creator_only_commands = {
+        # Let Creator Bot handle bare /start
+        if cmd == "/start" and len(parts) == 1:
+            raise ApplicationHandlerStop
+
+        # Creator Bot-only commands (prevent duplicate replies)
+        creator_commands = {
             "/create",
             "/done",
             "/cancel",
@@ -67,24 +80,55 @@ async def runner_gatekeeper(update: Update, context) -> None:
             "/broadcast",
             "/stats",
         }
-        if cmd in creator_only_commands:
-            raise ApplicationHandlerStop
-
-        # Let Creator Bot handle bare /start in DM
-        if cmd == "/start" and len(text.split()) == 1:
+        if cmd in creator_commands:
             raise ApplicationHandlerStop
 
 
 def build_application() -> Application:
+    """Construct the Runner Bot application instance."""
+    # Use RUNNER_BOT_TOKEN if defined, fallback to BOT_TOKEN
+    token = getattr(config, "RUNNER_BOT_TOKEN", None) or getattr(config, "BOT_TOKEN", None)
+    if not token:
+        raise ValueError("Neither RUNNER_BOT_TOKEN nor BOT_TOKEN is configured.")
+
     app = (
         ApplicationBuilder()
-        .token(config.RUNNER_BOT_TOKEN)
+        .token(token)
         .concurrent_updates(True)
         .build()
     )
 
-    # Priority group -1 ensures this check runs before any command handlers
+    # Priority group -1 ensures the gatekeeper executes before any command handler
     app.add_handler(TypeHandler(Update, runner_gatekeeper), group=-1)
 
+    # Register all runner handlers (quiz_play, scheduling, etc.)
     handlers.register(app)
     return app
+
+
+async def run_runner_bot(stop_event: asyncio.Event | None = None) -> None:
+    """Main runner bot entrypoint invoked by run.py."""
+    app = build_application()
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Runner Bot polling started successfully.")
+
+    own_event = stop_event or asyncio.Event()
+    try:
+        await own_event.wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        logger.info("Stopping Runner Bot...")
+        if app.updater and app.updater.running:
+            await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        logger.info("Runner Bot stopped cleanly.")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(run_runner_bot())
