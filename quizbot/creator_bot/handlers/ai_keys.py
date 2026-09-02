@@ -1,137 +1,104 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
+import json
 import logging
-from collections import defaultdict
+import re
+from telegram import Update
+from telegram.constants import ParseMode, ChatAction
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-from pyrogram import Client, filters
-from pyrogram.types import Message
-
-from quizbot.database import AIKeyRepository, get_db
-from quizbot.shared import config
-from quizbot.shared.utils import is_premium_user
-
-from ..ratelimit import ratelimit
+from ..ai_key_manager import ai_engine
+from ..telegram_utils import safe_send_message
 
 logger = logging.getLogger(__name__)
 
-PROVIDER_INFO: dict[str, str] = {
-    "gemini": "Gemini 2.5 Flash -- free key at aistudio.google.com",
-    "groq": "Groq Llama-3.3-70B -- fastest free tier, key at console.groq.com",
-    "openrouter": "OpenRouter -- many free models, key at openrouter.ai",
-    "openai": "OpenAI GPT-4o-mini -- key at platform.openai.com",
-    "mistral": "Mistral Small -- key at console.mistral.ai",
-    "pollinations": "Pollinations -- no key required (fallback)",
-}
 
-
-@ratelimit("default")
-async def setkey_cmd(c: Client, m: Message) -> None:
-    """/setkey <provider> <api_key> -- save a personal AI provider key."""
-    uid = m.from_user.id
-    if not await is_premium_user(uid):
-        await m.reply("Premium required: /pay")
+async def aiquiz_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /aiquiz <topic>: Generates 5 MCQ questions using the multi-engine AI pool."""
+    if not update.message:
         return
-    args = m.text.strip().split(maxsplit=2)
-    if len(args) < 3:
-        info = "\n".join(f"`{p}` -- {d}" for p, d in PROVIDER_INFO.items())
-        await m.reply(
-            "**Add AI API Key**\n\n"
-            "Usage: `/setkey <provider> <api_key>`\n"
-            "You can add multiple keys per provider.\n\n"
-            f"**Providers:**\n{info}"
+
+    chat_id = update.message.chat_id
+    topic = " ".join(ctx.args).strip() if ctx.args else ""
+
+    if not topic:
+        await safe_send_message(
+            ctx,
+            chat_id,
+            "💡 <b>How to use /aiquiz:</b>\n\n"
+            "• <code>/aiquiz Polity Fundamental Rights</code>\n"
+            "• <code>/aiquiz Modern History 1857 Revolt</code>\n"
+            "• <code>/aiquiz Organic Chemistry Hydrocarbons</code>",
+            parse_mode=ParseMode.HTML,
         )
         return
-    provider = args[1].strip().lower()
-    api_key = args[2].strip()
-    if provider not in config.SUPPORTED_AI_PROVIDERS:
-        await m.reply(f"Unknown provider. Use: {' | '.join(config.SUPPORTED_AI_PROVIDERS)}")
-        return
 
-    repo = AIKeyRepository(get_db())
-    await repo.add(uid, provider, api_key)
-    try:
-        await m.delete()  # keep the raw key out of chat history
-    except Exception:
-        logger.debug("Could not delete /setkey message (missing permission?)")
-
-    existing = await repo.list_for_provider(uid, provider)
-    await m.reply(
-        f"**{provider.title()} key #{len(existing)} added!**\n"
-        f"Preview: `{api_key[:8]}...`\n"
-        f"You now have **{len(existing)}** key(s) for {provider}.\n\n"
-        f"Use /mykeys to see all."
+    await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
+    status_msg = await safe_send_message(
+        ctx,
+        chat_id,
+        f"⚡ <i>Generating questions for:</i> <b>{topic}</b>...",
+        parse_mode=ParseMode.HTML,
     )
 
+    prompt = (
+        f"You are an expert exam question creator.\n"
+        f"Generate exactly 5 high-yield multiple choice questions on the topic: '{topic}'.\n"
+        f"Rules:\n"
+        f"1. Each question must have exactly 4 options.\n"
+        f"2. Indicate correct option with index (0 for A, 1 for B, 2 for C, 3 for D).\n"
+        f"3. Provide a brief explanation (under 30 words).\n"
+        f"4. Respond ONLY with a valid JSON array matching this format (no markdown fences, no other text):\n"
+        f"[\n"
+        f"  {{\n"
+        f'    "question": "Question text?",\n'
+        f'    "options": ["Opt A", "Opt B", "Opt C", "Opt D"],\n'
+        f'    "correct_option_id": 0,\n'
+        f'    "explanation": "Why correct"\n'
+        f"  }}\n"
+        f"]"
+    )
 
-@ratelimit("default")
-async def mykeys_cmd(c: Client, m: Message) -> None:
-    """/mykeys -- list saved AI provider keys, grouped by provider."""
-    uid = m.from_user.id
-    if not await is_premium_user(uid):
-        await m.reply("Premium required: /pay")
-        return
-    keys = await AIKeyRepository(get_db()).list_for_user(uid)
-    if not keys:
-        info = "\n".join(f"`{p}` -- {d}" for p, d in PROVIDER_INFO.items())
-        await m.reply(f"No AI keys saved.\n\nAdd one with `/setkey <provider> <api_key>`\n\n{info}")
-        return
-
-    by_provider: dict[str, list[dict]] = defaultdict(list)
-    for k in keys:
-        by_provider[k["provider"]].append(k)
-
-    lines = ["**Your AI Keys:**\n"]
-    for provider, provider_keys in sorted(by_provider.items()):
-        lines.append(f"**{provider.title()}** ({len(provider_keys)} key(s)):")
-        for k in provider_keys:
-            fail = f" ({k['fail_count']} fails)" if k.get("fail_count", 0) > 0 else ""
-            preview = (k.get("api_key") or "")[:8]
-            lines.append(f"  - ID `{k['id']}` -- `{preview}...`{fail}")
-    lines.append("\nDelete: `/delkey <provider>` | `/delkey id <id>` | `/delkey all`")
-    await m.reply("\n".join(lines))
-
-
-@ratelimit("default")
-async def delkey_cmd(c: Client, m: Message) -> None:
-    """/delkey <provider>|id <key_id>|all -- delete saved AI keys."""
-    uid = m.from_user.id
-    if not await is_premium_user(uid):
-        await m.reply("Premium required: /pay")
-        return
-    args = m.text.strip().split(maxsplit=2)
-    if len(args) < 2:
-        await m.reply("Usage: `/delkey <provider>` | `/delkey id <key_id>` | `/delkey all`")
+    try:
+        raw_output = await ai_engine.ask_fast(prompt)
+        cleaned_json = re.sub(r"^```(?:json)?|```$", "", raw_output.strip(), flags=re.MULTILINE).strip()
+        data = json.loads(cleaned_json)
+        if not isinstance(data, list):
+            raise ValueError("Invalid format received from AI.")
+    except Exception as exc:
+        logger.error("AI quiz generation error: %s", exc)
+        err_text = "❌ <b>Failed to generate questions.</b> Please try a different topic or try again in a few moments."
+        if status_msg:
+            await status_msg.edit_text(err_text, parse_mode=ParseMode.HTML)
+        else:
+            await safe_send_message(ctx, chat_id, err_text, parse_mode=ParseMode.HTML)
         return
 
-    repo = AIKeyRepository(get_db())
-    target = args[1].strip().lower()
+    # Build response message
+    lines = [f"🎯 <b>AI Quiz: {topic.title()}</b>\n"]
+    for i, q in enumerate(data, 1):
+        q_text = q.get("question", "")
+        options = q.get("options", [])
+        cid = q.get("correct_option_id", 0)
+        exp = q.get("explanation", "")
 
-    if target == "all":
-        await repo.delete_all(uid)
-        await m.reply("Deleted all your AI keys.")
-    elif target == "id" and len(args) == 3:
-        key_id = args[2].strip()
+        lines.append(f"<b>Q{i}. {q_text}</b>")
+        for idx, opt in enumerate(options):
+            marker = "✅" if idx == cid else "•"
+            lines.append(f"  {marker} {opt}")
+        if exp:
+            lines.append(f"  💡 <i>{exp}</i>")
+        lines.append("")
+
+    final_msg = "\n".join(lines).strip()
+    if status_msg:
         try:
-            await repo.delete_by_id(uid, key_id)
+            await status_msg.edit_text(final_msg, parse_mode=ParseMode.HTML)
         except Exception:
-            await m.reply("Invalid key ID. Use /mykeys to see IDs.")
-            return
-        await m.reply(f"Key `{key_id}` deleted.")
-    elif target in config.SUPPORTED_AI_PROVIDERS:
-        await repo.delete_by_provider(uid, target)
-        await m.reply(f"Deleted all {target.title()} key(s).")
+            await status_msg.edit_text(final_msg)
     else:
-        await m.reply("Unknown target. Use: `/delkey all` | `/delkey id <id>` | `/delkey <provider>`")
+        await safe_send_message(ctx, chat_id, final_msg, parse_mode=ParseMode.HTML)
 
 
-def register(app: Client) -> None:
-    app.on_message(filters.command("setkey") & filters.private)(setkey_cmd)
-    app.on_message(filters.command("mykeys") & filters.private)(mykeys_cmd)
-    app.on_message(filters.command("delkey") & filters.private)(delkey_cmd)
+def register(application: Application) -> None:
+    application.add_handler(CommandHandler(["aiquiz", "quizgen"], aiquiz_command))
