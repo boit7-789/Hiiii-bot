@@ -13,10 +13,21 @@ from quizbot.shared import config
 
 async def is_premium_user(user_id: int) -> bool:
     """Return True if the given Telegram user currently has an active premium
-    subscription. If FREE_BOT is enabled, every user is treated as premium.
+    subscription. If FREE_BOT is enabled, or the user is an owner/admin,
+    they are automatically treated as premium.
     """
     if config.FREE_BOT:
         return True
+
+    # 1. Automatically grant premium to bot Owner
+    if config.OWNER_ID and user_id == config.OWNER_ID:
+        return True
+
+    # 2. Automatically grant premium to all bot Admins
+    if user_id in config.ADMIN_IDS:
+        return True
+
+    # 3. Otherwise, check database subscription
     repo = UserRepository(get_db())
     return await repo.is_premium(user_id)
 
