@@ -1,3 +1,10 @@
+"""
+Advance Quiz Bot — Open Source Project
+This project was originally developed by Gagan (github.com/devgaganin).
+Reference: https://t.me/advance_quiz_bot
+The codebase has been reviewed and verified with the assistance of Claude AI.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -1191,7 +1198,7 @@ async def _send_pdf_report(
 
 async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """/quiz [quiz_id] [skip] or /start [quiz_id] [skip]
-    Launches the quiz setup wizard or displays the quiz launcher panel in DMs."""
+    Launches the quiz setup wizard or displays the quiz launcher panel in DMs/groups."""
     from .setup_wizard import show_correct_mark_prompt
     from ..state import pending_quiz_settings
 
@@ -1203,32 +1210,33 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         chat_type = update.message.chat.type
         is_anon = _is_anon_admin(update.message)
         user_id = update.message.from_user.id if update.message.from_user else None
+        
+        # Detect exact command invoked (strip / and @botname)
+        raw_cmd = (update.message.text or "").split()[0].lstrip("/")
+        cmd_invoked = raw_cmd.split("@")[0].lower()
 
-        # 1. Private DM Router
-        if chat_type == ChatType.PRIVATE:
-            # If the user typed plain /start with no arguments, let Creator Bot handle it
-            cmd_invoked = (update.message.text or "").split()[0].lstrip("/").lower()
-            if cmd_invoked == "start" and not ctx.args:
-                return
+        # 1. Plain /start with no arguments in private DM: ignore it completely
+        # (This lets Creator Bot handle your DM welcome card without interference)
+        if chat_type == ChatType.PRIVATE and cmd_invoked == "start" and not ctx.args:
+            return
 
-            # If the user typed /quiz with no arguments, show Launcher Hub
-            if cmd_invoked == "quiz" and not ctx.args:
-                launcher_text = (
-                    "🎯 <b>Quiz Launcher Hub</b>\n\n"
-                    "<b>How to play a quiz:</b>\n"
-                    "• <code>/quiz &lt;quiz_id&gt;</code> — Start any created quiz\n"
-                    "• Example: <code>/quiz QZ1001</code>\n\n"
-                    "<b>Other Play Modes:</b>\n"
-                    "• <code>/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt;</code> — Combine random questions\n"
-                    "• <code>/pollquiz &lt;quiz_id&gt;</code> — Untimed polls\n"
-                    "• <code>/aiquiz &lt;topic&gt;</code> — Generate instant quiz\n"
-                    "• <code>/pdfquiz</code> — Convert PDF to quiz\n\n"
-                    "<i>Tip: You can also use /quiz &lt;id&gt; inside any group!</i>"
-                )
-                await safe_send_message(ctx, chat_id, launcher_text, parse_mode=ParseMode.HTML)
-                return
+        # 2. Plain /quiz with NO arguments: show instructions in both DM and Group
+        if not ctx.args:
+            launcher_text = (
+                "🎯 <b>Quiz Launcher Hub</b>\n\n"
+                "<b>To launch a quiz:</b>\n"
+                "• <code>/quiz &lt;quiz_id&gt;</code> — Start a quiz\n"
+                "• Example: <code>/quiz QZ1001</code>\n\n"
+                "<b>Available Modes:</b>\n"
+                "• <code>/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt;</code> — Combine quizzes\n"
+                "• <code>/pollquiz &lt;quiz_id&gt;</code> — Non-expiring polls\n"
+                "• <code>/aiquiz &lt;topic&gt;</code> — Generate instant quiz\n"
+                "• <code>/pdfquiz</code> — Reply to a PDF"
+            )
+            await safe_send_message(ctx, chat_id, launcher_text, parse_mode=ParseMode.HTML)
+            return
 
-        # 2. Anonymous Admin check in groups
+        # 3. Anonymous Admin check in groups
         if is_anon and chat_type != ChatType.PRIVATE:
             qid_arg = ctx.args[0] if ctx.args else ""
             btn = InlineKeyboardMarkup([[
@@ -1241,16 +1249,23 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        # 3. Authorization check
+        # 4. Authorization check for launching quizzes
         is_adm = _is_owner(user_id) if user_id else False
-        if not is_adm and not await is_premium_user(user_id):
-            return
+        is_auth = is_adm or (await is_premium_user(user_id) if user_id else False)
+
+        # In groups, allow either authorized users/owner OR group administrators
+        if chat_type != ChatType.PRIVATE:
+            is_group_admin = await _require_admin(ctx, chat_id, user_id, is_anon)
+            if not is_auth and not is_group_admin:
+                await safe_send_message(ctx, chat_id, "🚫 Only authorized members or group admins can start a quiz.")
+                return
+        else:
+            # In DMs, only authorized users/owner can launch
+            if not is_auth:
+                return
 
         if user_id and not await rate_limiter.check(user_id):
             await safe_send_message(ctx, chat_id, "⏱️ Too many requests. Wait a moment.")
-            return
-
-        if not ctx.args:
             return
 
         qid = ctx.args[0]
@@ -1330,6 +1345,28 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as e:
         logger.error("start_quiz error: %s", e, exc_info=True)
         await safe_send_message(ctx, chat_id, "❌ Error starting quiz.")
+
+
+async def group_help_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /help in groups and private chats with full Runner controls."""
+    if not update.message:
+        return
+
+    text = (
+        "🎮 <b>Group Quiz Controls</b>\n\n"
+        "<b>Starting Quizzes:</b>\n"
+        "• <code>/quiz &lt;quiz_id&gt;</code> — Start a quiz session\n"
+        "• <code>/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt;</code> — Combine multiple quizzes\n"
+        "• <code>/pollquiz &lt;quiz_id&gt;</code> — Non-expiring poll mode\n\n"
+        "<b>Quiz Controls (Admins):</b>\n"
+        "• <code>/pause</code> — Pause active quiz\n"
+        "• <code>/resume</code> — Resume paused quiz\n"
+        "• <code>/stop</code> — End current quiz immediately\n"
+        "• <code>/slow</code> | <code>/normal</code> | <code>/fast</code> — Adjust timers\n"
+        "• <code>/leaderboard</code> — Display current scores\n\n"
+        "<i>To create or manage quizzes, message the bot in private DM.</i>"
+    )
+    await safe_send_message(ctx, update.message.chat_id, text, parse_mode=ParseMode.HTML)
 
 
 async def _send_access_denied(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: dict, batch: Optional[dict]) -> None:
@@ -1618,8 +1655,8 @@ async def _check_anti_cheat(
 
 def register(application: Application) -> None:
     """Register all quiz-play command/poll handlers on the Application."""
-    # Listens for both /quiz and /start
     application.add_handler(CommandHandler(["quiz", "start"], start_quiz))
+    application.add_handler(CommandHandler("help", group_help_command))
     application.add_handler(CommandHandler("pause", pause_quiz))
     application.add_handler(CommandHandler("resume", resume_quiz))
     application.add_handler(CommandHandler("stop", stop_quiz))
