@@ -1,178 +1,138 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
 import asyncio
-import time
-from collections import defaultdict, deque
-from typing import Any, Optional
+import logging
+
+from telegram import Update
+from telegram.constants import ChatType
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ApplicationHandlerStop,
+    TypeHandler,
+)
 
 from quizbot.shared import config
+from quizbot.shared.utils import is_premium_user
+from . import handlers
+
+logger = logging.getLogger(__name__)
 
 
-class SessionManager:
-    """Active-quiz session state, keyed by chat_id.
+def _is_owner(user_id: int) -> bool:
+    owner_id = (
+        getattr(config, "OWNER_ID", None)
+        or getattr(config, "ADMIN_USER_ID", None)
+        or getattr(config, "OWNER_USER_ID", None)
+    )
+    if not owner_id:
+        return False
+    try:
+        return str(owner_id) == str(user_id)
+    except (TypeError, ValueError):
+        return False
 
-    Reads are lock-free (safe under the single-threaded asyncio event loop);
-    writes take a lock so concurrent updates from different tasks (poll
-    timeouts, poll-answer handlers, the quiz-runner loop) don't interleave.
+
+async def runner_gatekeeper(update: Update, context) -> None:
+    """1. In DMs: Creator Bot handles management and bare /start.
+       Runner Bot processes /quiz, DM scorecards, or active poll interactions for authorized users.
+    2. In Groups: Students can participate in polls freely.
     """
+    msg = update.effective_message
+    user = update.effective_user
 
-    def __init__(self) -> None:
-        self.sessions: dict[int, dict[str, Any]] = {}
-        self._activity: dict[int, float] = {}
-        self._lock = asyncio.Lock()
+    # Handle private DM restrictions
+    if msg and msg.chat and msg.chat.type == ChatType.PRIVATE:
+        if not user:
+            raise ApplicationHandlerStop
 
-    async def create(self, chat_id: int, data: dict[str, Any]) -> None:
-        async with self._lock:
-            self.sessions[chat_id] = data
-            self._activity[chat_id] = time.time()
+        text = (msg.text or "").strip()
+        parts = text.split()
+        cmd = parts[0].lower() if parts else ""
 
-    def get(self, chat_id: int) -> Optional[dict[str, Any]]:
-        """Lock-free read -- safe because of the GIL + single event loop."""
-        s = self.sessions.get(chat_id)
-        if s is not None:
-            self._activity[chat_id] = time.time()
-        return s
-
-    async def update(self, chat_id: int, updates: dict[str, Any]) -> None:
-        async with self._lock:
-            if chat_id in self.sessions:
-                self.sessions[chat_id].update(updates)
-                self._activity[chat_id] = time.time()
-
-    async def delete(self, chat_id: int) -> Optional[dict[str, Any]]:
-        async with self._lock:
-            self._activity.pop(chat_id, None)
-            return self.sessions.pop(chat_id, None)
-
-    async def cleanup(self) -> None:
-        """Drop sessions with no activity for longer than SESSION_TIMEOUT."""
-        async with self._lock:
-            now = time.time()
-            dead = [
-                cid for cid, t in self._activity.items()
-                if now - t > config.SESSION_TIMEOUT
-            ]
-            for cid in dead:
-                self.sessions.pop(cid, None)
-                self._activity.pop(cid, None)
-
-    def active_count(self) -> int:
-        return len(self.sessions)
-
-
-session_mgr = SessionManager()
-
-
-class RateLimiter:
-    """Simple sliding-window rate limiter, one bucket per user."""
-
-    def __init__(self) -> None:
-        self.buckets: dict[int, deque] = defaultdict(
-            lambda: deque(maxlen=config.RATE_LIMIT_MAX_REQUESTS)
-        )
-
-    async def check(self, user_id: int) -> bool:
-        now = time.time()
-        bucket = self.buckets[user_id]
-        while bucket and bucket[0] < now - config.RATE_LIMIT_WINDOW:
-            bucket.popleft()
-        if len(bucket) >= config.RATE_LIMIT_MAX_REQUESTS:
-            return False
-        bucket.append(now)
-        return True
-
-    def cleanup(self) -> None:
-        now = time.time()
-        dead = [
-            uid for uid, b in self.buckets.items()
-            if not b or b[-1] < now - config.RATE_LIMIT_WINDOW
-        ]
-        for uid in dead:
-            del self.buckets[uid]
-
-
-rate_limiter = RateLimiter()
-
-
-class TaskTracker:
-    """Keeps strong references to all spawned asyncio tasks so they are
-    never garbage-collected mid-flight, and logs exceptions instead of
-    silently swallowing them (no fire-and-forget tasks anywhere)."""
-
-    def __init__(self) -> None:
-        self._tasks: dict[str, asyncio.Task] = {}
-        self._counter = 0
-
-    def spawn(self, coro, name: str = "") -> asyncio.Task:
-        self._counter += 1
-        task_id = f"{name}_{self._counter}" if name else f"task_{self._counter}"
-        task = asyncio.create_task(coro, name=task_id)
-        self._tasks[task_id] = task
-        task.add_done_callback(lambda t: self._on_done(task_id, t))
-        return task
-
-    def _on_done(self, task_id: str, task: asyncio.Task) -> None:
-        import logging
-
-        self._tasks.pop(task_id, None)
-        if task.cancelled():
+        # Allow ANY student to receive their individual scorecard in DM without auth checks
+        if cmd == "/start" and len(parts) > 1 and parts[1].startswith("dmscore_"):
             return
-        exc = task.exception()
-        if exc:
-            logging.getLogger(__name__).error("Task %s crashed: %s", task_id, exc, exc_info=exc)
 
-    def active_count(self) -> int:
-        return len(self._tasks)
+        is_adm = _is_owner(user.id)
+        try:
+            is_auth = is_adm or await is_premium_user(user.id)
+        except Exception:
+            is_auth = is_adm
 
-    def cancel_all_for_chat(self, chat_id: int) -> None:
-        prefix = f"quiz_{chat_id}_"
-        for task_id, task in list(self._tasks.items()):
-            if prefix in task_id and not task.done():
-                task.cancel()
+        # Mute Runner Bot completely for unauthorized users in DMs for standard commands
+        if not is_auth:
+            raise ApplicationHandlerStop
 
+        # Let Creator Bot handle bare /start
+        if cmd == "/start" and len(parts) == 1:
+            raise ApplicationHandlerStop
 
-tasks = TaskTracker()
-
-# chat_id -> asyncio.Task for an ongoing channel /pollquiz run.
-channel_poll_tasks: dict[int, asyncio.Task] = {}
-
-# Pending quiz-setup wizard state (before a quiz begins), keyed by chat_id.
-# See handlers/setup_wizard.py for the qs_* callback flow that populates this.
-pending_quiz_settings: dict[int, dict[str, Any]] = {}
-
-# /aiquiz wizard state, keyed by the initiating user's id.
-AI_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
-
-# /pdfquiz wizard state, keyed by the initiating user's id.
-PDF_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
-
-
-class TranslationManager:
-    """Per-chat active translation language for /trans."""
-
-    def __init__(self) -> None:
-        self.settings: dict[int, Optional[str]] = {}
-
-    def get_language(self, chat_id: int) -> Optional[str]:
-        return self.settings.get(chat_id)
-
-    def set_language(self, chat_id: int, lang: Optional[str]) -> None:
-        if lang:
-            self.settings[chat_id] = lang
-        else:
-            self.settings.pop(chat_id, None)
+        # Creator Bot-only commands (prevent duplicate replies)
+        creator_commands = {
+            "/create",
+            "/done",
+            "/cancel",
+            "/myquizzes",
+            "/edit",
+            "/import",
+            "/batch",
+            "/admin",
+            "/limit",
+            "/auth",
+            "/removeuser",
+            "/broadcast",
+            "/stats",
+        }
+        if cmd in creator_commands:
+            raise ApplicationHandlerStop
 
 
-translation_mgr = TranslationManager()
+def build_application() -> Application:
+    """Construct the Runner Bot application instance."""
+    # Use RUNNER_BOT_TOKEN if defined, fallback to BOT_TOKEN
+    token = getattr(config, "RUNNER_BOT_TOKEN", None) or getattr(config, "BOT_TOKEN", None)
+    if not token:
+        raise ValueError("Neither RUNNER_BOT_TOKEN nor BOT_TOKEN is configured.")
 
-# Cache of the last AI provider+key that worked per user, so /aiquiz and
-# /pdfquiz chunked generation doesn't re-probe every provider on each chunk.
-# user_id -> {"provider": str, "key_id": int|None, "api_key": str}
-last_working_ai: dict[int, dict[str, Any]] = {}
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .concurrent_updates(True)
+        .build()
+    )
+
+    # Priority group -1 ensures the gatekeeper executes before any command handler
+    app.add_handler(TypeHandler(Update, runner_gatekeeper), group=-1)
+
+    # Register all runner handlers (quiz_play, scheduling, etc.)
+    handlers.register(app)
+    return app
+
+
+async def run_runner_bot(stop_event: asyncio.Event | None = None) -> None:
+    """Main runner bot entrypoint invoked by run.py."""
+    app = build_application()
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Runner Bot polling started successfully.")
+
+    own_event = stop_event or asyncio.Event()
+    try:
+        await own_event.wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        logger.info("Stopping Runner Bot...")
+        if app.updater and app.updater.running:
+            await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        logger.info("Runner Bot stopped cleanly.")
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(run_runner_bot())
