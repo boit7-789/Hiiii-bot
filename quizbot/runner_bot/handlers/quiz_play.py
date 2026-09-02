@@ -1,10 +1,3 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -63,8 +56,7 @@ _ANON_ADMIN_ID = 1087968824  # Telegram's fake @GroupAnonymousBot user id.
 # How often (every N questions) to auto-post a mid-quiz leaderboard. 0 disables it.
 MID_QUIZ_LB_INTERVAL = 10
 
-# Anti-cheat pattern-detection tuning (not part of shared config -- specific
-# to this handler's group-quiz cheat check, separate from CHEAT_SPEED_THRESHOLD).
+# Anti-cheat pattern-detection tuning
 CHEAT_CHECK_EVERY = 10
 CHEAT_WRONG_RATIO = 0.5
 
@@ -75,10 +67,26 @@ def _is_anon_admin(message) -> bool:
     )
 
 
+def _is_owner(user_id: int) -> bool:
+    owner_id = (
+        getattr(config, "OWNER_ID", None)
+        or getattr(config, "ADMIN_USER_ID", None)
+        or getattr(config, "OWNER_USER_ID", None)
+    )
+    if not owner_id:
+        return False
+    try:
+        return int(owner_id) == user_id
+    except (TypeError, ValueError):
+        return False
+
+
 async def _require_admin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: Optional[int], is_anon: bool) -> bool:
     """Return True if the caller may run admin-only quiz-control commands."""
     if is_anon:
-        return True  # Telegram only delivers anonymous-admin commands from actual admins.
+        return True
+    if user_id and _is_owner(user_id):
+        return True
     try:
         member = await ctx.bot.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
@@ -87,8 +95,7 @@ async def _require_admin(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: 
 
 
 async def translate_text(text: str, target_lang: str) -> str:
-    """Translate text via deep-translator (lazy import). Falls back to the
-    original text on any failure so translation is never fatal to a quiz."""
+    """Translate text via deep-translator (lazy import). Falls back to original on failure."""
     try:
         from deep_translator import GoogleTranslator
     except ImportError:
@@ -145,8 +152,7 @@ async def wait_until_resumed(chat_id: int) -> None:
 
 
 def _apply_char_boost(q: dict, timer: int) -> int:
-    """Long questions get a little extra reading time when the timer is
-    already short: >600 chars -> +30s, >450 chars -> +20s."""
+    """Extra reading time for long questions: >600 chars -> +30s, >450 chars -> +20s."""
     total_chars = len(q.get("question", ""))
     for opt in q.get("options", []):
         total_chars += len(opt)
@@ -206,7 +212,7 @@ async def _private_section_start(chat_id: int, section: dict, skip: int = 0) -> 
     ctx = s["context"]
     msg = await safe_send_message(
         ctx, chat_id,
-        f"\U0001F4DA <b>{name}</b> started\n⏱️ Timer: {timer}s\n\U0001F4CB Q{start_idx}–{end_idx}",
+        f"📚 <b>{name}</b> started\n⏱️ Timer: {timer}s\n📋 Q{start_idx}–{end_idx}",
         parse_mode=ParseMode.HTML,
     )
     if msg:
@@ -256,7 +262,7 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
 
         if target_lang and target_lang != "en":
             await safe_send_message(
-                ctx, chat_id, f"\U0001F4DD <b>Original</b>\n\n{original_q['question']}", parse_mode=ParseMode.HTML
+                ctx, chat_id, f"📝 <b>Original</b>\n\n{original_q['question']}", parse_mode=ParseMode.HTML
             )
             await asyncio.sleep(0.5)
 
@@ -269,10 +275,6 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
             except Exception:
                 pass
 
-        # -- Rich-text pre-pass -------------------------------------------
-        # If the question, options, or reference text contain markup the
-        # native poll UI can't render (LaTeX, GFM tables, multi-paragraph
-        # HTML), pre-send that content via sendRichMessage before the poll.
         _tid = s.get("message_thread_id")
         rich_res: RichDispatchResult = await enrich_question_dispatch(
             lambda method, params: send_raw_api(ctx, method, params),
@@ -312,12 +314,6 @@ async def send_private_question(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE, id
         if poll_desc:
             poll_kwargs["description"] = poll_desc
 
-        # Content protection (forward/save block): ON by default for every
-        # private-chat play session too, and only lifted when the quiz's own
-        # creator is playing it in their own DM -- same rule as the group
-        # path in start_quiz() (`protect = not (chat_id == creator_id and
-        # chat_type == "private")`). In a private chat chat_id IS the
-        # player's own user id, so this comparison is exact.
         protect = not (chat_id == s["quiz_data"].get("creator_id"))
 
         poll_msg = await safe_send_poll(
@@ -437,7 +433,7 @@ async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None
         neg = quiz_data.get("negative_marking", 0)
         correct_mark = quiz_data.get("correct_mark", 1)
 
-        await safe_send_message(ctx, chat_id, "\U0001F4CA Calculating results...")
+        await safe_send_message(ctx, chat_id, "📊 Calculating results...")
 
         udata = s["participants"].get(chat_id, {})
         correct = wrong = 0
@@ -457,16 +453,16 @@ async def end_private_quiz(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> None
         minutes, seconds = divmod(total_time, 60)
 
         qid = quiz_data["question_set_id"]
-        buttons = [[InlineKeyboardButton("\U0001F504 Restart", url=f"https://t.me/share/url?url=/start {qid}")]]
+        buttons = [[InlineKeyboardButton("🔄 Restart", url=f"https://t.me/share/url?url=/quiz {qid}")]]
 
         qname = quiz_data.get("quiz_name", "Unnamed Quiz")
         txt = (
-            f"\U0001F3C6 <b>Quiz Completed!</b>\n\n"
-            f"\U0001F4DD Quiz: {qname}\n\U0001F4CA Total: {total}\n\n"
-            f"\U0001F4C8 <b>Your Performance:</b>\n"
+            f"🏆 <b>Quiz Completed!</b>\n\n"
+            f"📝 Quiz: {qname}\n📊 Total: {total}\n\n"
+            f"📈 <b>Your Performance:</b>\n"
             f"✅ Correct: {correct}\n❌ Wrong: {wrong}\n"
-            f"\U0001F3AF Score: {score:.2f}\n⏱️ Time: {int(minutes)}m {int(seconds)}s\n"
-            f"\U0001F4CA Percentage: {pct:.1f}%\n\U0001F3AF Accuracy: {acc:.1f}%"
+            f"🎯 Score: {score:.2f}\n⏱️ Time: {int(minutes)}m {int(seconds)}s\n"
+            f"📊 Percentage: {pct:.1f}%\n🎯 Accuracy: {acc:.1f}%"
         )
         await safe_send_message(ctx, chat_id, txt, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
 
@@ -568,7 +564,7 @@ async def _run_sectioned_quiz(chat_id, ctx, questions, quiz, sections, protect, 
         if not session:
             return
 
-        mode_lbl = f"\U0001F550 {slot_mins} min total slot" if mode == "slot" else f"⏱ {sec_timer}s per question"
+        mode_lbl = f"🕐 {slot_mins} min total slot" if mode == "slot" else f"⏱ {sec_timer}s per question"
         global_cm = quiz.get("correct_mark", 1)
         global_neg = quiz.get("negative_marking", 0)
         sec_cm = section.get("correct_mark", global_cm)
@@ -576,7 +572,7 @@ async def _run_sectioned_quiz(chat_id, ctx, questions, quiz, sections, protect, 
 
         sec_msg = await safe_send_message(
             ctx, chat_id,
-            f"\U0001F4DA <b>{sec_name}</b>\n\U0001F4CB Q{start_q}–{end_q}  ({n_qs_sec} questions)\n"
+            f"📚 <b>{sec_name}</b>\n📋 Q{start_q}–{end_q}  ({n_qs_sec} questions)\n"
             f"{mode_lbl}  ·  Marks: +{sec_cm} / -{sec_neg}",
             parse_mode=ParseMode.HTML,
         )
@@ -632,7 +628,7 @@ async def _run_sectioned_quiz(chat_id, ctx, questions, quiz, sections, protect, 
 
             await _close_section_polls(ctx, chat_id, sec_questions)
             await safe_send_message(
-                ctx, chat_id, f"\U0001F514 <b>{sec_name}</b> — time's up! All polls closed.", parse_mode=ParseMode.HTML
+                ctx, chat_id, f"🔔 <b>{sec_name}</b> — time's up! All polls closed.", parse_mode=ParseMode.HTML
             )
         else:
             for idx in sec_questions:
@@ -678,7 +674,6 @@ async def _run_sectioned_quiz(chat_id, ctx, questions, quiz, sections, protect, 
 
 
 async def _send_group_question(chat_id, ctx, questions, idx, total, base_timer, do_shuffle, protect, session) -> bool:
-    """Send a single question in a group. Returns True on success."""
     try:
         q = questions[idx]
         original_q = q.copy()
@@ -700,7 +695,7 @@ async def _send_group_question(chat_id, ctx, questions, idx, total, base_timer, 
 
         if target_lang and target_lang != "en":
             await safe_send_message(
-                ctx, chat_id, f"\U0001F4DD <b>Original</b>\n\n{original_q['question']}", parse_mode=ParseMode.HTML
+                ctx, chat_id, f"📝 <b>Original</b>\n\n{original_q['question']}", parse_mode=ParseMode.HTML
             )
             await asyncio.sleep(0.5)
 
@@ -713,7 +708,6 @@ async def _send_group_question(chat_id, ctx, questions, idx, total, base_timer, 
             except Exception:
                 pass
 
-        # -- Rich-text pre-pass (see send_private_question for details) ----
         _tid = session.get("message_thread_id")
         rich_res: RichDispatchResult = await enrich_question_dispatch(
             lambda method, params: send_raw_api(ctx, method, params),
@@ -774,8 +768,6 @@ async def _send_group_question(chat_id, ctx, questions, idx, total, base_timer, 
 
 
 async def _close_section_polls(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, q_indices: list[int]) -> None:
-    """Stop all open polls for a slot-mode section, respecting Telegram's
-    group rate limit (~20 msgs/min => ~3s minimum gap between calls)."""
     session = session_mgr.get(chat_id)
     if not session:
         return
@@ -798,7 +790,6 @@ async def _close_section_polls(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, q_i
                 err = str(e).lower()
                 if "retry" in err or "429" in err or "flood" in err:
                     import re
-
                     m = re.search(r"retry.after.(\d+)", err)
                     wait = int(m.group(1)) + 1 if m else 5
                     await asyncio.sleep(wait)
@@ -836,21 +827,16 @@ async def _send_mid_quiz_leaderboard(chat_id: int, ctx: ContextTypes.DEFAULT_TYP
         if not rows:
             return
         rows.sort(key=lambda x: x["score"], reverse=True)
-        text = f"\U0001F4CA <b>Live Leaderboard</b> — after Q{q_num}/{total}\n{'─' * 28}\n"
+        text = f"📊 <b>Live Leaderboard</b> — after Q{q_num}/{total}\n{'─' * 28}\n"
         for rank, r in enumerate(rows[:10], 1):
-            icon = {1: "\U0001F947", 2: "\U0001F948", 3: "\U0001F949"}.get(rank, f"{rank}.")
-            text += f"{icon} <b>{str(r['name'])[:25]}</b>  ✅{r['correct']} ❌{r['wrong']}  \U0001F3AF {r['score']:.1f}\n"
+            icon = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"{rank}.")
+            text += f"{icon} <b>{str(r['name'])[:25]}</b>  ✅{r['correct']} ❌{r['wrong']}  🎯 {r['score']:.1f}\n"
         await safe_send_message(ctx, chat_id, text, parse_mode=ParseMode.HTML)
     except Exception as e:
         logger.error("_send_mid_quiz_leaderboard error: %s", e)
 
 
 async def _send_explanation_after_poll(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, q: dict, thread_id: Optional[int] = None) -> None:
-    """Send the post-answer explanation. Uses sendRichMessage (Bot API 10.1)
-    when the explanation contains rich/math markup that the plain 4096-char
-    text send would mangle or truncate too aggressively; falls back to a
-    plain HTML message otherwise (or automatically, if sendRichMessage
-    isn't available on the receiving client)."""
     try:
         expl = (q.get("explanation") or "").strip()
         if not expl:
@@ -861,7 +847,7 @@ async def _send_explanation_after_poll(ctx: ContextTypes.DEFAULT_TYPE, chat_id: 
             kw["message_thread_id"] = thread_id
 
         if _is_rich(expl):
-            body = _normalise_math_spacing(f"\U0001F4A1 **Explanation:**\n\n{expl}")
+            body = _normalise_math_spacing(f"💡 **Explanation:**\n\n{expl}")
             await send_rich_or_fallback(
                 lambda method, params: send_raw_api(ctx, method, params),
                 lambda text: ctx.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML, **kw),
@@ -870,7 +856,7 @@ async def _send_explanation_after_poll(ctx: ContextTypes.DEFAULT_TYPE, chat_id: 
             return
 
         await ctx.bot.send_message(
-            chat_id=chat_id, text=f"\U0001F4A1 <b>Explanation:</b>\n\n{expl[:4000]}", parse_mode=ParseMode.HTML, **kw,
+            chat_id=chat_id, text=f"💡 <b>Explanation:</b>\n\n{expl[:4000]}", parse_mode=ParseMode.HTML, **kw,
         )
     except Exception as e:
         logger.debug("_send_explanation_after_poll: %s", e)
@@ -888,17 +874,14 @@ async def _end_group_quiz(chat_id, ctx, update, quiz, protect_type) -> None:
 
 
 def _lb_rich_md(quiz_name: str, chunk: list, start_rank: int, total: int, sections: Optional[list] = None) -> str:
-    """Build a GFM table leaderboard string for sendRichMessage (up to ~100
-    rows per chunk), including a per-section top-5 breakdown when the quiz
-    has sections. Ported from the original's `_lb_rich_md`."""
     lines = [
-        f"### \U0001F3C6 {quiz_name}",
+        f"### 🏆 {quiz_name}",
         "",
         "| # | Name | ✅ | ❌ | Score | Time | % |",
         "|--:|:-----|--:|--:|------:|-----:|--:|",
     ]
     for j, u in enumerate(chunk, start=start_rank):
-        icon = "\U0001F947" if j == 1 else "\U0001F948" if j == 2 else "\U0001F949" if j == 3 else str(j)
+        icon = "🥇" if j == 1 else "🥈" if j == 2 else "🥉" if j == 3 else str(j)
         pct = (u["correct"] / total * 100) if total else 0
         m, sec = divmod(int(u["total_time"]), 60)
         name = str(u["name"])[:22].replace("|", "\\|")
@@ -911,13 +894,13 @@ def _lb_rich_md(quiz_name: str, chunk: list, start_rank: int, total: int, sectio
         lines.append("")
         lines.append("---")
         lines.append("")
-        lines.append("### \U0001F4DA Section Breakdown")
+        lines.append("### 📚 Section Breakdown")
         lines.append("")
         for sec in sections:
             sec_name = sec.get("name", f"Section {sec['question_range'][0]}-{sec['question_range'][1]}")
             s, e = sec["question_range"]
             q_count = e - s + 1
-            mode_lbl = "\U0001F550 Slot" if sec.get("mode") == "slot" else "⏱ Per-poll"
+            mode_lbl = "🕐 Slot" if sec.get("mode") == "slot" else "⏱ Per-poll"
             cm_lbl = sec.get("correct_mark", "—")
             neg_lbl = sec.get("neg_mark", "—")
             timer_lbl = (
@@ -942,7 +925,7 @@ def _lb_rich_md(quiz_name: str, chunk: list, start_rank: int, total: int, sectio
             lines.append("| # | Name | ✅ | ❌ | Sec.Score |")
             lines.append("|--:|:-----|--:|--:|----------:|")
             for r, row in enumerate(sec_rows[:5], 1):
-                icon = "\U0001F947" if r == 1 else "\U0001F948" if r == 2 else "\U0001F949" if r == 3 else f"{r}."
+                icon = "🥇" if r == 1 else "🥈" if r == 2 else "🥉" if r == 3 else f"{r}."
                 lines.append(
                     f"| {icon} | {str(row['name'])[:20].replace('|', chr(92) + '|')} |"
                     f" {row['correct']} | {row['wrong']} | {row['score']:.2f} |"
@@ -953,8 +936,6 @@ def _lb_rich_md(quiz_name: str, chunk: list, start_rank: int, total: int, sectio
 
 
 async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, protect_type: bool) -> None:
-    """Compute the leaderboard for a finished/stopped group quiz, post it,
-    and (if enabled for this chat) generate HTML/PDF reports."""
     chat_id: Optional[int] = None
     try:
         if getattr(update, "message", None) is not None:
@@ -1047,7 +1028,7 @@ async def end_quiz(update: Any, ctx: ContextTypes.DEFAULT_TYPE, quiz_id: str, pr
 
         if not leaderboard:
             if placeholder:
-                await placeholder.edit_text(f"\U0001F3C6 Quiz '{quiz_name}' ended!\n\n❌ No answers recorded.")
+                await placeholder.edit_text(f"🏆 Quiz '{quiz_name}' ended!\n\n❌ No answers recorded.")
             return
 
         leaderboard.sort(key=lambda x: (x["score"], -x["total_time"]), reverse=True)
@@ -1083,18 +1064,12 @@ async def _record_attempt_and_report(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz_data: dict, leaderboard: list[dict],
     *, chat_title: str, protect_type: bool, thread_id: Optional[int],
 ) -> None:
-    """Persist attempts/leaderboard rows to the DB and send HTML/PDF reports
-    if enabled for this chat. Replaces the old local quiz_results/*.json
-    file-storage approach entirely -- everything lands in SQLite."""
     from quizbot.database import ChatSettingsRepository
 
     qid = quiz_data.get("question_set_id", "")
     total = len(quiz_data.get("questions", []))
     db = get_db()
 
-    # Persist a completed attempt + leaderboard row per participant (if the
-    # quiz exists in the DB -- ad-hoc AI/PDF/mix quizzes are not persisted
-    # since they have no qid row to reference).
     quiz_repo = QuizRepository(db)
     quiz_exists = bool(await quiz_repo.get(qid)) if qid else False
     if quiz_exists:
@@ -1141,7 +1116,7 @@ async def _record_attempt_and_report(
             html_bytes, filename = await render_quiz_html(report_quiz, mode="exam")
             await ctx.bot.send_document(
                 chat_id=chat_id, document=html_bytes, filename=filename,
-                caption="\U0001F4C4 Interactive quiz report",
+                caption="📄 Interactive quiz report",
                 **({"message_thread_id": thread_id} if thread_id else {}),
             )
         except Exception as e:
@@ -1155,8 +1130,6 @@ async def _send_pdf_report(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz_data: dict, chat_title: str,
     leaderboard: list[dict], session_polls: Optional[dict], thread_id: Optional[int],
 ) -> None:
-    """Render and send a PDF quiz report, offloading WeasyPrint's
-    synchronous rendering to a thread-pool executor."""
     try:
         orig_questions = quiz_data.get("questions", [])
         neg_val = quiz_data.get("negative_marking", 0)
@@ -1193,8 +1166,8 @@ async def _send_pdf_report(
         if pdf_ok and os.path.exists(pdf_path):
             try:
                 caption = (
-                    f"\U0001F4C4 <b>{quiz_name}</b>\n\U0001F4DA {chat_title}\n"
-                    f"\U0001F465 {len(leaderboard)} participant(s)\n\n"
+                    f"📄 <b>{quiz_name}</b>\n📚 {chat_title}\n"
+                    f"👥 {len(leaderboard)} participant(s)\n\n"
                     f"<i>Full quiz report with questions, answers &amp; results</i>"
                 )
                 with open(pdf_path, "rb") as pf:
@@ -1217,8 +1190,8 @@ async def _send_pdf_report(
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/start [quiz_id] [skip] -- launches the quiz-setup wizard, or shows a
-    welcome message if no quiz id was given."""
+    """/quiz [quiz_id] [skip] or /start [quiz_id] [skip]
+    Launches the quiz setup wizard or displays the quiz launcher panel in DMs."""
     from .setup_wizard import show_correct_mark_prompt
     from ..state import pending_quiz_settings
 
@@ -1229,7 +1202,33 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         chat_type = update.message.chat.type
         is_anon = _is_anon_admin(update.message)
+        user_id = update.message.from_user.id if update.message.from_user else None
 
+        # 1. Private DM Router
+        if chat_type == ChatType.PRIVATE:
+            # If the user typed plain /start with no arguments, let Creator Bot handle it
+            cmd_invoked = (update.message.text or "").split()[0].lstrip("/").lower()
+            if cmd_invoked == "start" and not ctx.args:
+                return
+
+            # If the user typed /quiz with no arguments, show Launcher Hub
+            if cmd_invoked == "quiz" and not ctx.args:
+                launcher_text = (
+                    "🎯 <b>Quiz Launcher Hub</b>\n\n"
+                    "<b>How to play a quiz:</b>\n"
+                    "• <code>/quiz &lt;quiz_id&gt;</code> — Start any created quiz\n"
+                    "• Example: <code>/quiz QZ1001</code>\n\n"
+                    "<b>Other Play Modes:</b>\n"
+                    "• <code>/mix &lt;count&gt; &lt;id1&gt; &lt;id2&gt;</code> — Combine random questions\n"
+                    "• <code>/pollquiz &lt;quiz_id&gt;</code> — Untimed polls\n"
+                    "• <code>/aiquiz &lt;topic&gt;</code> — Generate instant quiz\n"
+                    "• <code>/pdfquiz</code> — Convert PDF to quiz\n\n"
+                    "<i>Tip: You can also use /quiz &lt;id&gt; inside any group!</i>"
+                )
+                await safe_send_message(ctx, chat_id, launcher_text, parse_mode=ParseMode.HTML)
+                return
+
+        # 2. Anonymous Admin check in groups
         if is_anon and chat_type != ChatType.PRIVATE:
             qid_arg = ctx.args[0] if ctx.args else ""
             btn = InlineKeyboardMarkup([[
@@ -1242,12 +1241,12 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             )
             return
 
-        user_id = update.message.from_user.id
-
-        if not await is_premium_user(user_id):
+        # 3. Authorization check
+        is_adm = _is_owner(user_id) if user_id else False
+        if not is_adm and not await is_premium_user(user_id):
             return
 
-        if not await rate_limiter.check(user_id):
+        if user_id and not await rate_limiter.check(user_id):
             await safe_send_message(ctx, chat_id, "⏱️ Too many requests. Wait a moment.")
             return
 
@@ -1257,19 +1256,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         qid = ctx.args[0]
         skip = int(ctx.args[1]) if len(ctx.args) > 1 and ctx.args[1].isdigit() else 0
 
-        # The inline-share "Play Quiz" button opens `?startapp=play_<qid>_
-        # <mode>` (see mini_app_link.py's _startapp_payload) so it can work
-        # from a context where a native web_app button isn't allowed. When
-        # the Mini App is registered with BotFather, Telegram launches it
-        # directly and this handler never runs. But if the Mini App isn't
-        # registered yet, or the user's client doesn't support Mini Apps,
-        # Telegram falls back to a plain `/start play_<qid>_<mode>` command
-        # here instead -- and without unwrapping that payload first, `qid`
-        # would literally be the string "play_<qid>_<mode>", which never
-        # matches a real quiz id, so every fallback used to fail with
-        # "Invalid QuestionSetID." Detect and unwrap it, then hand the user
-        # a working native Play button (safe here since /start is always a
-        # private chat) instead of silently erroring out.
+        # Unwrap Mini App payload if applicable
         mini_app_mode: Optional[str] = None
         if qid.startswith("play_") and "_" in qid[len("play_"):]:
             body = qid[len("play_"):]
@@ -1295,11 +1282,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if mini_app_mode and chat_type == ChatType.PRIVATE:
-            # The Mini App WebApp launch didn't happen (not registered with
-            # BotFather yet, or an older client) -- offer a real native
-            # web_app button here instead of silently starting the classic
-            # poll-based quiz the user didn't ask for.
-            label = "\U0001F3AF Play (Practice)" if mini_app_mode == "practice" else "\U0001F4DD Play (Exam)"
+            label = "🎯 Play (Practice)" if mini_app_mode == "practice" else "📝 Play (Exam)"
             play_btn = mini_app_web_app_button_ptb(qid, mini_app_mode, label)
             if play_btn:
                 await safe_send_message(
@@ -1309,20 +1292,12 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     reply_markup=InlineKeyboardMarkup([[play_btn]]),
                 )
                 return
-            # Mini App isn't configured at all (no MINI_APP_DOMAIN) --
-            # fall through to the classic poll-based quiz below so the
-            # link still does *something* useful instead of a dead end.
 
         allowed, batch = await resolve_quiz_access(qid, quiz, chat_id, chat_type, user_id, ctx=ctx)
         if not allowed:
             await _send_access_denied(ctx, chat_id, quiz, batch)
             return
 
-        # Content protection (forward/save block) defaults to ON for every
-        # quiz -- free or paid -- and is only lifted when the creator is
-        # running their own quiz in their own private chat. Matches the
-        # original bot's `protect = True; if chat_id == creator_id and
-        # chat_type == "private": protect = False` logic exactly.
         protect = not (chat_id == quiz.get("creator_id") and chat_type == "private")
 
         quiz["question_set_id"] = quiz["qid"]
@@ -1341,14 +1316,9 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             "initiator_id": user_id, "message_thread_id": cmd_thread_id,
         }
 
-        # Offer the visual Mini App player as an alternative to the classic
-        # poll-based flow -- private chats only (web_app buttons aren't
-        # valid in groups), doesn't touch pending_quiz_settings/the wizard
-        # below at all, just an extra informational message. Silently
-        # skipped if MINI_APP_DOMAIN isn't configured.
         if chat_type == ChatType.PRIVATE:
-            play_practice = mini_app_web_app_button_ptb(qid, "practice", "\U0001F3AF Play (Practice)")
-            play_exam = mini_app_web_app_button_ptb(qid, "exam", "\U0001F4DD Play (Exam)")
+            play_practice = mini_app_web_app_button_ptb(qid, "practice", "🎯 Play (Practice)")
+            play_exam = mini_app_web_app_button_ptb(qid, "exam", "📝 Play (Exam)")
             if play_practice and play_exam:
                 await safe_send_message(
                     ctx, chat_id,
@@ -1365,19 +1335,19 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def _send_access_denied(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, quiz: dict, batch: Optional[dict]) -> None:
     creator_id = quiz.get("creator_id")
     if batch:
-        msg = f"\U0001F512 <b>Paid Quiz — Access Required</b>\n\n\U0001F4E6 Batch: <b>{batch.get('name', '')}</b>\n"
+        msg = f"🔒 <b>Paid Quiz — Access Required</b>\n\n📦 Batch: <b>{batch.get('name', '')}</b>\n"
         if batch.get("description"):
-            msg += f"\U0001F4DD {batch['description']}\n"
+            msg += f"📝 {batch['description']}\n"
         if batch.get("payment_link"):
-            msg += f"\n\U0001F4B3 <b>Pay here:</b> {batch['payment_link']}\n"
+            msg += f"\n💳 <b>Pay here:</b> {batch['payment_link']}\n"
         if batch.get("contact_info"):
-            msg += f"\U0001F4DE <b>Contact:</b> {batch['contact_info']}\n"
+            msg += f"📞 <b>Contact:</b> {batch['contact_info']}\n"
         msg += "\nAfter payment, send screenshot to the contact above."
         await safe_send_message(ctx, chat_id, msg, parse_mode=ParseMode.HTML)
     else:
         try:
             cinfo = await ctx.bot.get_chat(creator_id)
-            details = f"\U0001F464 {cinfo.first_name or ''}\n\U0001F4AC @{cinfo.username or 'N/A'}\n\U0001F522 ID: {cinfo.id}"
+            details = f"👤 {cinfo.first_name or ''}\n💬 @{cinfo.username or 'N/A'}\n🔢 ID: {cinfo.id}"
             await safe_send_message(ctx, chat_id, f"❌ Contact the quiz creator for access.\n\n{details}")
         except Exception:
             await safe_send_message(ctx, chat_id, f"❌ Contact creator ID {creator_id} for access.")
@@ -1403,11 +1373,11 @@ async def stop_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             else:
                 await end_quiz(update, ctx, session["quiz_id"], True)
             await session_mgr.delete(chat_id)
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Quiz stopped.")
+            await safe_send_message(ctx, chat_id, "🚫 Quiz stopped.")
             return
 
         if not await _require_admin(ctx, chat_id, user_id, is_anon):
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+            await safe_send_message(ctx, chat_id, "🚫 Admin only.")
             return
 
         tasks.cancel_all_for_chat(chat_id)
@@ -1416,7 +1386,7 @@ async def stop_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await end_quiz(update, ctx, qid, True)
         finally:
             await session_mgr.delete(chat_id)
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Quiz stopped by admin.")
+            await safe_send_message(ctx, chat_id, "🚫 Quiz stopped by admin.")
     except Exception as e:
         logger.error("stop_quiz error: %s", e, exc_info=True)
 
@@ -1435,7 +1405,7 @@ async def pause_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if chat_type != ChatType.PRIVATE and not await _require_admin(ctx, chat_id, user_id, is_anon):
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+            await safe_send_message(ctx, chat_id, "🚫 Admin only.")
             return
 
         await session_mgr.update(chat_id, {"paused": True})
@@ -1459,7 +1429,7 @@ async def resume_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             return
 
         if chat_type != ChatType.PRIVATE and not await _require_admin(ctx, chat_id, user_id, is_anon):
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+            await safe_send_message(ctx, chat_id, "🚫 Admin only.")
             return
 
         await session_mgr.update(chat_id, {"paused": False})
@@ -1492,7 +1462,7 @@ async def _adjust_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, delta: i
         return
 
     if chat_type != ChatType.PRIVATE and not await _require_admin(ctx, chat_id, user_id, is_anon):
-        await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+        await safe_send_message(ctx, chat_id, "🚫 Admin only.")
         return
 
     offset = session.get("modified_timer_offset", 0) + seconds
@@ -1502,7 +1472,6 @@ async def _adjust_timer(update: Update, ctx: ContextTypes.DEFAULT_TYPE, delta: i
 
 
 async def fast_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/fast -- shortens the remaining per-question timer by 5s (or a given amount)."""
     try:
         await _adjust_timer(update, ctx, -5)
     except Exception as e:
@@ -1510,7 +1479,6 @@ async def fast_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def slow_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/slow -- lengthens the remaining per-question timer by 5s (or a given amount)."""
     try:
         await _adjust_timer(update, ctx, 5)
     except Exception as e:
@@ -1518,7 +1486,6 @@ async def slow_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def normal_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/normal -- resets the per-question timer offset to zero."""
     chat_id = update.message.chat.id
     try:
         chat_type = update.message.chat.type
@@ -1530,7 +1497,7 @@ async def normal_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_send_message(ctx, chat_id, "⚠️ No quiz running.")
             return
         if chat_type != ChatType.PRIVATE and not await _require_admin(ctx, chat_id, user_id, is_anon):
-            await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+            await safe_send_message(ctx, chat_id, "🚫 Admin only.")
             return
 
         await session_mgr.update(chat_id, {"modified_timer_offset": 0})
@@ -1540,7 +1507,6 @@ async def normal_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """/leaderboard -- shows a live top-10 leaderboard for the running quiz."""
     try:
         chat_id = update.message.chat.id
         user_id = update.message.from_user.id
@@ -1555,7 +1521,7 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
             try:
                 member = await ctx.bot.get_chat_member(chat_id, user_id)
                 if member.status not in ("administrator", "creator"):
-                    await safe_send_message(ctx, chat_id, "\U0001F6AB Admin only.")
+                    await safe_send_message(ctx, chat_id, "🚫 Admin only.")
                     return
             except Exception:
                 return
@@ -1568,9 +1534,6 @@ async def leaderboard_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def handle_poll_answer(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """PollAnswerHandler: routes an incoming answer to the matching private
-    or group session, records it, and runs anti-cheat detection for groups
-    that opted in."""
     try:
         pa = update.poll_answer
         poll_id = pa.poll_id
@@ -1622,9 +1585,6 @@ async def _check_anti_cheat(
     ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, session: dict, poll_id: str,
     user_id: int, user_name: str, option_ids: list, correct: Any, now: float,
 ) -> None:
-    """Speed+accuracy pattern check: users who repeatedly answer faster than
-    config.CHEAT_SPEED_THRESHOLD *and* get it wrong are flagged as likely
-    running a duplicate/bot account and auto-kicked past a suspicion ratio."""
     pinfo = session["polls"][poll_id]
     sent_time = pinfo.get("sent_time", now)
     answer_time = now - sent_time
@@ -1647,7 +1607,7 @@ async def _check_anti_cheat(
         await ctx.bot.ban_chat_member(chat_id, user_id)
         await safe_send_message(
             ctx, chat_id,
-            f"\U0001F6AB <b>{user_name}</b> was removed from the group!\n\n"
+            f"🚫 <b>{user_name}</b> was removed from the group!\n\n"
             f"<i>Suspicious rapid-wrong-answer pattern detected (possible duplicate account).</i>",
             parse_mode=ParseMode.HTML,
         )
@@ -1657,8 +1617,9 @@ async def _check_anti_cheat(
 
 
 def register(application: Application) -> None:
-    """Register all quiz-play command/poll handlers on the given Application."""
-    application.add_handler(CommandHandler("start", start_quiz))
+    """Register all quiz-play command/poll handlers on the Application."""
+    # Listens for both /quiz and /start
+    application.add_handler(CommandHandler(["quiz", "start"], start_quiz))
     application.add_handler(CommandHandler("pause", pause_quiz))
     application.add_handler(CommandHandler("resume", resume_quiz))
     application.add_handler(CommandHandler("stop", stop_quiz))
