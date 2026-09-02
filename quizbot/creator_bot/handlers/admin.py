@@ -1,6 +1,6 @@
 """
-Advance Quiz Bot — Open Source Project
-Admin, Start, Help, and Limit Handlers
+Advance Quiz Bot — Private Whitelist Mode
+Admin, Start, Help, and Global Authorization Guard
 """
 
 from __future__ import annotations
@@ -18,13 +18,29 @@ from pyrogram.types import (
 
 from quizbot.database import QuizRepository, UserRepository, get_db
 from quizbot.shared import config
+from quizbot.shared.utils import is_premium_user
 from .. import keyboards, state
 
 logger = logging.getLogger(__name__)
 
+OWNER_CONTACT_URL = "https://t.me/cuetchampion"
+
 
 def _is_owner(uid: int) -> bool:
-    return uid == config.OWNER_ID or (config.ADMIN_IDS and uid in config.ADMIN_IDS)
+    return uid == config.OWNER_ID or (bool(config.ADMIN_IDS) and uid in config.ADMIN_IDS)
+
+
+async def send_restricted_notice(m: Message, uid: int) -> None:
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("💬 Contact Owner for Access", url=OWNER_CONTACT_URL)]]
+    )
+    await m.reply(
+        "🔒 **Access Restricted**\n\n"
+        "This bot is private and requires manual authorization.\n\n"
+        f"📋 **Your Telegram ID:** `{uid}`\n\n"
+        "Click below to contact the owner directly to request access.",
+        reply_markup=kb,
+    )
 
 
 async def start_cmd(c: Client, m: Message, *args, **kwargs) -> None:
@@ -32,9 +48,12 @@ async def start_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     if user is None:
         return
 
-    logger.info("Received /start from user_id: %s", user.id)
+    # 1. Gate: Block unauthorized users immediately
+    if not await is_premium_user(user.id):
+        await send_restricted_notice(m, user.id)
+        return
 
-    # Track user in database safely
+    # Track authorized user in database
     try:
         user_repo = UserRepository(get_db())
         await user_repo.ensure_user(user.id, user.username or "", user.first_name or "")
@@ -53,6 +72,11 @@ async def start_cmd(c: Client, m: Message, *args, **kwargs) -> None:
 async def help_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     user = m.from_user
     if user is None:
+        return
+
+    # Block unauthorized users
+    if not await is_premium_user(user.id):
+        await send_restricted_notice(m, user.id)
         return
 
     text = (
@@ -81,6 +105,11 @@ async def help_cmd(c: Client, m: Message, *args, **kwargs) -> None:
 async def limit_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     user = m.from_user
     if user is None:
+        return
+
+    # Block unauthorized users
+    if not await is_premium_user(user.id):
+        await send_restricted_notice(m, user.id)
         return
 
     if _is_owner(user.id):
@@ -113,7 +142,6 @@ async def limit_cmd(c: Client, m: Message, *args, **kwargs) -> None:
 async def admin_panel_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     user = m.from_user
     if user is None or not _is_owner(user.id):
-        await m.reply("⛔ This command is restricted to the Bot Owner and Admins.")
         return
 
     buttons = [
@@ -148,7 +176,7 @@ async def admin_callback(c: Client, cq: CallbackQuery) -> None:
         text = (
             "📊 **Live System Statistics**\n\n"
             f"• **Total Registered Users:** `{total_users}`\n"
-            f"• **Authorized / Premium Users:** `{premium_users}`\n"
+            f"• **Authorized Users:** `{premium_users}`\n"
             f"• **Total Quizzes Created:** `{total_quizzes}`\n"
         )
         await cq.message.edit_text(
@@ -164,7 +192,7 @@ async def admin_callback(c: Client, cq: CallbackQuery) -> None:
             "📢 **Broadcast Instructions:**\n\n"
             "To send a broadcast to all users, use:\n"
             "`/broadcast <your message>`\n\n"
-            "Or reply directly to any text, photo, or document message with `/broadcast`."
+            "Or reply directly to any message with `/broadcast`."
         )
         await cq.message.edit_text(
             text,
@@ -243,7 +271,7 @@ async def stats_cmd(c: Client, m: Message, *args, **kwargs) -> None:
     text = (
         "📊 **Bot Statistics**\n\n"
         f"• Total Users: {total_users}\n"
-        f"• Premium Users: {premium_users}\n"
+        f"• Authorized Users: {premium_users}\n"
         f"• Total Quizzes: {total_quizzes}\n"
     )
     await m.reply(text)
