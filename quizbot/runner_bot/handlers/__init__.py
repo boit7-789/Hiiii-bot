@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from telegram.ext import Application
 
-from . import ai_quiz, mix, pdf_quiz, poll_quiz, quiz_play, reports, scheduling, setup_wizard, translation
+from . import (
+    ai_doubt,
+    ai_quiz,
+    mix,
+    pdf_quiz,
+    poll_quiz,
+    quiz_play,
+    reports,
+    scheduling,
+    setup_wizard,
+    translation,
+)
 
 _MODULES = (
     quiz_play,
@@ -14,6 +25,7 @@ _MODULES = (
     reports,
     scheduling,
     translation,
+    ai_doubt,
 )
 
 
