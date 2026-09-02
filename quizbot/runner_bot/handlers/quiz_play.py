@@ -1222,6 +1222,9 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     from .setup_wizard import show_correct_mark_prompt
     from ..state import pending_quiz_settings
 
+    if not update.message:
+        return
+
     chat_id = update.message.chat_id
     try:
         chat_type = update.message.chat.type
@@ -1230,7 +1233,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if is_anon and chat_type != ChatType.PRIVATE:
             qid_arg = ctx.args[0] if ctx.args else ""
             btn = InlineKeyboardMarkup([[
-                InlineKeyboardButton("\U0001F464 Tap here to verify your identity", callback_data=f"qs_anon_verify_{chat_id}_{qid_arg}")
+                InlineKeyboardButton("👤 Tap here to verify your identity", callback_data=f"qs_anon_verify_{chat_id}_{qid_arg}")
             ]])
             await safe_send_message(
                 ctx, chat_id,
@@ -1241,10 +1244,9 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
         user_id = update.message.from_user.id
 
-       user_id = update.message.from_user.id
-
         if not await is_premium_user(user_id):
             return
+
         if not await rate_limiter.check(user_id):
             await safe_send_message(ctx, chat_id, "⏱️ Too many requests. Wait a moment.")
             return
