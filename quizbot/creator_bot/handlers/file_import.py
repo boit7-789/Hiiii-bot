@@ -29,9 +29,40 @@ def _is_owner_or_admin(user_id: int) -> bool:
     if not owner_id:
         return False
     try:
-        return int(owner_id) == user_id
+        return str(owner_id) == str(user_id)
     except (TypeError, ValueError):
         return False
+
+
+async def process_uploaded_file(c: Client, m: Message) -> list[dict] | None:
+    """Helper used by quiz_creation to parse uploaded files into question lists."""
+    if not m.document:
+        return None
+
+    fname = (m.document.file_name or "").lower()
+    if not (fname.endswith(".txt") or fname.endswith(".json")):
+        return None
+
+    try:
+        file_bytes = await c.download_media(m, in_memory=True)
+        raw_data = bytes(file_bytes.getbuffer()).decode("utf-8")
+
+        if fname.endswith(".json"):
+            data = json.loads(raw_data)
+            return data if isinstance(data, list) else data.get("questions", [])
+
+        from .quiz_creation import parse_question_block
+        parsed = []
+        for block in raw_data.strip().split("\n\n"):
+            if not block.strip():
+                continue
+            q = parse_question_block(block)
+            if q:
+                parsed.append(q)
+        return parsed or None
+    except Exception as e:
+        logger.error("process_uploaded_file error: %s", e)
+        return None
 
 
 async def import_command(c: Client, m: Message) -> None:
@@ -45,14 +76,14 @@ async def import_command(c: Client, m: Message) -> None:
                 await m.reply_text("🔒 Premium required to import quizzes: /pay")
                 return
         except Exception as e:
-            logger.error("Premium check error in import_cmd: %s", e)
+            logger.error("Premium check error in import_command: %s", e)
             await m.reply_text("🔒 Premium required to import quizzes: /pay")
             return
 
-    # Check if user replied to a document
     target_msg = m.reply_to_message if m.reply_to_message and m.reply_to_message.document else None
-    
-    if not target_msg and not m.document:
+    doc_msg = target_msg or (m if m.document else None)
+
+    if not doc_msg:
         await m.reply_text(
             "📂 **Quiz File Importer**\n\n"
             "To import a quiz from a file:\n"
@@ -70,9 +101,7 @@ async def import_command(c: Client, m: Message) -> None:
         )
         return
 
-    doc_msg = target_msg or m
     doc = doc_msg.document
-
     if not (doc.file_name.endswith(".txt") or doc.file_name.endswith(".json")):
         await m.reply_text("⚠️ Please provide a valid **.txt** or **.json** file.")
         return
@@ -80,24 +109,7 @@ async def import_command(c: Client, m: Message) -> None:
     status_msg = await m.reply_text("⏳ Downloading and parsing file...")
 
     try:
-        file_bytes = await c.download_media(doc_msg, in_memory=True)
-        raw_data = bytes(file_bytes.getbuffer()).decode("utf-8")
-
-        parsed_questions = []
-
-        if doc.file_name.endswith(".json"):
-            data = json.loads(raw_data)
-            parsed_questions = data if isinstance(data, list) else data.get("questions", [])
-        else:
-            from .quiz_creation import parse_question_block
-            blocks = raw_data.strip().split("\n\n")
-            for block in blocks:
-                if not block.strip():
-                    continue
-                q = parse_question_block(block)
-                if q:
-                    parsed_questions.append(q)
-
+        parsed_questions = await process_uploaded_file(c, doc_msg)
         if not parsed_questions:
             await status_msg.edit_text("❌ No valid questions found in this file.")
             return
