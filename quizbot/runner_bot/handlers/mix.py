@@ -1,10 +1,3 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -44,10 +37,10 @@ async def mix_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await safe_send_message(
                 ctx,
                 chat_id,
-                f"🔒 <b>Access Restricted</b>\n\n"
-                f"This bot is private and requires manual authorization.\n\n"
+                "🔒 <b>Access Restricted</b>\n\n"
+                "This bot is private and requires manual authorization.\n\n"
                 f"📋 <b>Your Telegram ID:</b> <code>{user_id}</code>\n\n"
-                f"Contact the owner below to request access.",
+                "Contact the owner below to request access.",
                 reply_markup=kb,
                 parse_mode="HTML",
             )
@@ -131,7 +124,7 @@ async def mix_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         names_str = ", ".join(names[:3]) + ("…" if len(names) > 3 else "")
         mix_quiz = {
             "question_set_id": mix_id,
-            "quiz_name": f"\U0001F3B2 Mix ({len(mixed)}Q) — {names_str}",
+            "quiz_name": f"🎲 Mix ({len(mixed)}Q) — {names_str}",
             "questions": mixed,
             "timer": 30,
             "negative_marking": 0,
