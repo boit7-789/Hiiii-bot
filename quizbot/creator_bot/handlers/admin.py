@@ -90,11 +90,11 @@ async def send_help_reference(c: Client, chat_id: int, user_id: int) -> None:
             "• `/stats` — View system and database statistics\n"
         )
 
-    # Message 2: Runner Reference
+   # --- Message 2: Runner Reference ---
     runner_text = (
         "🎮 **Quiz Runner Bot — Command Reference**\n\n"
         "**Playing Quizzes (Groups & Channels):**\n"
-        "• `/start <quiz_id>` — Launch a quiz\n"
+        "• `/quiz <quiz_id>` — Launch a quiz\n"
         "• `/pause`, `/resume`, `/stop` — Control running quiz\n"
         "• `/slow`, `/fast`, `/normal` — Adjust question timer\n"
         "• `/leaderboard` — Show live mid-quiz leaderboard\n\n"
