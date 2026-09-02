@@ -11,7 +11,7 @@ import logging
 import random
 import time
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from quizbot.database import QuizRepository, get_db
@@ -23,18 +23,36 @@ from .setup_wizard import show_correct_mark_prompt
 
 logger = logging.getLogger(__name__)
 
+OWNER_CONTACT_URL = "https://t.me/cuetchampion"
+
 
 async def mix_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Fetch an equal share of questions from each given quiz id (min 2
     ids, 20-100 total questions) and run them as one instant quiz."""
+    if not update.message:
+        return
+
     chat_id = update.message.chat_id
     try:
         chat_type = update.message.chat.type
         user_id = update.message.from_user.id if update.message.from_user else None
 
         if not await is_premium_user(user_id):
-            await safe_send_message(ctx, chat_id, "Please help us to make this project more valuable by purchasing premium! Thanks")
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💬 Contact Owner for Access", url=OWNER_CONTACT_URL)]]
+            )
+            await safe_send_message(
+                ctx,
+                chat_id,
+                f"🔒 <b>Access Restricted</b>\n\n"
+                f"This bot is private and requires manual authorization.\n\n"
+                f"📋 <b>Your Telegram ID:</b> <code>{user_id}</code>\n\n"
+                f"Contact the owner below to request access.",
+                reply_markup=kb,
+                parse_mode="HTML",
+            )
             return
+
         if not await rate_limiter.check(user_id):
             await safe_send_message(ctx, chat_id, "⏱️ Too many requests. Wait a moment.")
             return
@@ -42,7 +60,8 @@ async def mix_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         args = ctx.args or []
         if len(args) < 3:
             await safe_send_message(
-                ctx, chat_id,
+                ctx,
+                chat_id,
                 "❌ Usage: <code>/mix &lt;count&gt; &lt;quizid1&gt; &lt;quizid2&gt; ...</code>\n\n"
                 "Example: <code>/mix 50 QID1 QID2 QID3</code>\n"
                 "• count: 20–100 (equal questions from each ID)\n"
@@ -113,19 +132,32 @@ async def mix_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         mix_quiz = {
             "question_set_id": mix_id,
             "quiz_name": f"\U0001F3B2 Mix ({len(mixed)}Q) — {names_str}",
-            "questions": mixed, "timer": 30, "negative_marking": 0,
-            "shuffle": False, "shuffle_options": False, "sections": [],
-            "creator_id": user_id, "quiz_type": "free", "promo_message": "",
+            "questions": mixed,
+            "timer": 30,
+            "negative_marking": 0,
+            "shuffle": False,
+            "shuffle_options": False,
+            "sections": [],
+            "creator_id": user_id,
+            "quiz_type": "free",
+            "promo_message": "",
         }
 
         cmd_thread_id = getattr(update.message, "message_thread_id", None)
         pending_quiz_settings[chat_id] = {
-            "quiz": mix_quiz, "update": update, "skip": 0,
-            "protect": False, "chat_type": chat_type,
-            "correct_mark": 1.0, "neg_mark": 0.0,
-            "shuffle_q": False, "shuffle_o": False,
-            "show_explanation": False, "timer_override": None,
-            "initiator_id": user_id, "message_thread_id": cmd_thread_id,
+            "quiz": mix_quiz,
+            "update": update,
+            "skip": 0,
+            "protect": False,
+            "chat_type": chat_type,
+            "correct_mark": 1.0,
+            "neg_mark": 0.0,
+            "shuffle_q": False,
+            "shuffle_o": False,
+            "show_explanation": False,
+            "timer_override": None,
+            "initiator_id": user_id,
+            "message_thread_id": cmd_thread_id,
         }
         await show_correct_mark_prompt(ctx, chat_id)
     except Exception as e:
