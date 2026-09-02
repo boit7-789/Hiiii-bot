@@ -1,6 +1,20 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
+from __future__ import annotations
+
+import logging
+from pyrogram import Client
+
+from . import admin, auth, batches, file_import, payments, quiz_creation, quiz_editor
+
+logger = logging.getLogger(__name__)
+
+
+def register_all_handlers(app: Client) -> None:
+    """Register all creator bot command and callback handlers."""
+    admin.register(app)
+    auth.register(app)
+    batches.register(app)
+    file_import.register(app)
+    payments.register(app)
+    quiz_creation.register(app)
+    quiz_editor.register(app)
+    logger.info("Creator bot handlers successfully registered.")
