@@ -1,10 +1,3 @@
-"""
-Advance Quiz Bot — Open Source Project
-This project was originally developed by Gagan (github.com/devgaganin).
-Reference: https://t.me/advance_quiz_bot
-The codebase has been reviewed and verified with the assistance of Claude AI.
-"""
-
 from __future__ import annotations
 
 import fractions
@@ -12,6 +5,7 @@ import logging
 from io import BytesIO
 
 from pyrogram import Client, filters
+from pyrogram.handlers import CallbackQueryHandler, MessageHandler
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from quizbot.database import QuizRepository, get_db
@@ -24,7 +18,21 @@ from ..ratelimit import ratelimit
 
 logger = logging.getLogger(__name__)
 
-QUESTIONS_PER_PAGE = config.QUESTIONS_PER_PAGE
+QUESTIONS_PER_PAGE = getattr(config, "QUESTIONS_PER_PAGE", 10)
+
+
+def _is_owner_or_admin(user_id: int) -> bool:
+    owner_id = (
+        getattr(config, "OWNER_ID", None)
+        or getattr(config, "ADMIN_USER_ID", None)
+        or getattr(config, "OWNER_USER_ID", None)
+    )
+    if not owner_id:
+        return False
+    try:
+        return int(owner_id) == user_id
+    except (TypeError, ValueError):
+        return False
 
 
 def _can_edit(quiz: dict, user_id: int) -> bool:
@@ -32,7 +40,7 @@ def _can_edit(quiz: dict, user_id: int) -> bool:
         return False
     if quiz.get("creator_id") == user_id:
         return True
-    if user_id == config.OWNER_ID or user_id in config.ADMIN_IDS:
+    if _is_owner_or_admin(user_id):
         return True
     return user_id in (quiz.get("edit_permissions") or [])
 
@@ -56,21 +64,39 @@ def _quiz_info_text(quiz: dict) -> str:
 async def edit_cmd(c: Client, m: Message) -> None:
     """/edit <quiz_id> -- open the inline quiz editor."""
     uid = m.from_user.id
-    if not await is_premium_user(uid):
-        await m.reply("🔒 Premium required: /pay")
-        return
-    args = m.text.split()
+    is_owner = _is_owner_or_admin(uid)
+    
+    if not is_owner:
+        try:
+            if not await is_premium_user(uid):
+                await m.reply("🔒 Premium required: /pay")
+                return
+        except Exception as e:
+            logger.error("Premium check error in edit_cmd: %s", e)
+            await m.reply("🔒 Premium required: /pay")
+            return
+
+    args = m.text.strip().split()
     if len(args) < 2:
-        await m.reply("Usage: `/edit <quiz_id>`")
+        await m.reply(
+            "✏️ **Quiz Editor**\n\n"
+            "To edit a quiz, include the Quiz ID:\n"
+            "• `/edit <quiz_id>`\n\n"
+            "Example: `/edit QZ1001`\n\n"
+            "💡 *Tip: You can also use /myquizzes to find your Quiz IDs.*"
+        )
         return
-    qid = args[1]
+
+    qid = args[1].strip()
     quiz = await QuizRepository(get_db()).get(qid)
     if not quiz:
-        await m.reply("⚠️ Not found.")
+        await m.reply("⚠️ Quiz not found. Please verify the ID.")
         return
+
     if not _can_edit(quiz, uid):
-        await m.reply("🔐 No permission to edit this quiz.")
+        await m.reply("🔐 You do not have permission to edit this quiz.")
         return
+
     state.edit_sessions[uid] = {"qid": qid, "page": 0, "field": None}
     await m.reply(f"✍️ **Quiz Editor**\n\n{_quiz_info_text(quiz)}", reply_markup=quiz_editor_main_kb(qid))
 
@@ -90,7 +116,7 @@ async def _show_questions_page(cb: CallbackQuery, qid: str, page: int) -> None:
     quiz = await QuizRepository(get_db()).get(qid)
     questions = quiz.get("questions", []) if quiz else []
     if not questions:
-        await cb.message.edit_text("⚠️ No questions.")
+        await cb.message.edit_text("⚠️ No questions found.")
         return
     total_pages = (len(questions) + QUESTIONS_PER_PAGE - 1) // QUESTIONS_PER_PAGE
     page = max(0, min(page, total_pages - 1))
@@ -163,7 +189,7 @@ async def _replace_question(m: Message, uid: int, qid: str, idx: int, text: str)
     parsed = parse_question_block(text)
     if not parsed or isinstance(parsed["correct_option_id"], list):
         await m.reply(
-            "⚠️ Invalid format.\n\nFormat:\nQuestion\nOpt1\nOpt2 (correct one marked with a check emoji)\nOpt3\nEx: Explanation"
+            "⚠️ Invalid format.\n\nFormat:\nQuestion\nOpt1\nOpt2 (marked correct)\nOpt3\nEx: Explanation"
         )
         return
     repo = QuizRepository(get_db())
@@ -417,22 +443,18 @@ _FIELD_PROMPTS = {
 
 
 async def edit_tree_cb(c: Client, cb: CallbackQuery) -> None:
-    """Every callback in the /edit tree except settings (`stg_`), payments
-    (`plan_`/`pay_`/`buy_`), quick-save (`qd_`), search (`srch_`), batches
-    (`bat_`), and quiz-list pagination (`prev:`/`next:`/`refresh:`) --
-    those are routed to their own handler modules."""
     uid = cb.from_user.id
-    data = cb.data
+    data = cb.data or ""
     if data == "page_info":
         await cb.answer()
         return
     if uid not in state.edit_sessions:
-        await cb.answer()
+        await cb.answer("⚠️ Session expired. Please send /edit <quiz_id> again.", show_alert=True)
         return
     qid = state.edit_sessions[uid]["qid"]
     quiz = await QuizRepository(get_db()).get(qid)
     if not quiz:
-        await cb.answer("⚠️ Not found", show_alert=True)
+        await cb.answer("⚠️ Quiz not found", show_alert=True)
         return
 
     try:
@@ -459,7 +481,7 @@ async def edit_tree_cb(c: Client, cb: CallbackQuery) -> None:
                 {"field": "replace_question", "q_idx": int(parts[1]), "page": int(parts[2]) if len(parts) > 2 else 0}
             )
             await cb.message.edit_text(
-                "🔁 **Replace Question**\n\nFormat:\nQuestion\nOpt1\nOpt2 (mark correct with a check emoji)\nOpt3\nEx: Explanation"
+                "🔁 **Replace Question**\n\nFormat:\nQuestion\nOpt1\nOpt2 (marked correct)\nOpt3\nEx: Explanation"
             )
         elif data.startswith("delq_"):
             parts = data.split("_")
@@ -477,7 +499,7 @@ async def edit_tree_cb(c: Client, cb: CallbackQuery) -> None:
         elif data.startswith("add_"):
             state.edit_sessions[uid]["field"] = "add_questions"
             await cb.message.edit_text(
-                "➕ **Add Questions**\n\nFormat:\nQuestion\nOpt1\nOpt2 (mark correct with a check emoji)\nOpt3\n"
+                "➕ **Add Questions**\n\nFormat:\nQuestion\nOpt1\nOpt2 (marked correct)\nOpt3\n"
                 "Ex: Explanation\n\nSeparate multiple questions with a blank line."
             )
         elif data.startswith("exp_"):
@@ -526,9 +548,7 @@ def in_edit_session_filter():
 
 
 async def handle_edit_text_input(c: Client, m: Message) -> None:
-    """Free-text input while an /edit field or a creator-settings field is
-    awaiting a value. Settings input (`stg_field`) is delegated to
-    handlers/settings.py so its logic stays in one place."""
+    """Free-text input while an /edit field or a creator-settings field is awaiting a value."""
     uid = m.from_user.id
     session = state.edit_sessions.get(uid, {})
 
@@ -605,9 +625,13 @@ async def handle_edit_text_input(c: Client, m: Message) -> None:
 
 
 def register(app: Client) -> None:
-    app.on_message(filters.command("edit") & filters.private)(edit_cmd)
-    app.on_message(filters.command("stopedit") & filters.private)(stopedit_cmd)
-    app.on_callback_query(
-        filters.regex(r"^(?!stg_|dtc_|plan_|pay_|buy_|qd_|srch_|bat_|prev:|next:|refresh:)")
-    )(edit_tree_cb)
-    app.on_message(filters.text & filters.private & in_edit_session_filter())(handle_edit_text_input)
+    app.add_handler(MessageHandler(edit_cmd, filters.command("edit") & filters.private))
+    app.add_handler(MessageHandler(stopedit_cmd, filters.command("stopedit") & filters.private))
+    # Targeted regex matching editor actions instead of negative-lookahead hijacking
+    app.add_handler(
+        CallbackQueryHandler(
+            edit_tree_cb,
+            filters.regex(r"^(main_|set_|qmgr_|view_|next_|prev_|eq_|replace_|delq_|delrange_|ename_|etimer_|etype_|eneg_|add_|exp_|shuf_|tshufq_|tshufo_|perms_|addperm_|remperm_|epromo_|close_|page_info)"),
+        )
+    )
+    app.add_handler(MessageHandler(handle_edit_text_input, filters.text & filters.private & in_edit_session_filter()))
