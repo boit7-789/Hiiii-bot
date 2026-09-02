@@ -50,11 +50,7 @@ CREATOR_BOT_TOKEN: str | None = _env("CREATOR_BOT_TOKEN")
 RUNNER_BOT_TOKEN: str | None = _env("RUNNER_BOT_TOKEN")
 
 # ---------------------------------------------------------------------------
-# Database (MongoDB Atlas -- a hosted database reachable over the network,
-# so data survives dyno restarts/redeploys on ephemeral hosts like Heroku.
-# The old local-SQLite-file setup lost all data on every restart there.
-# Get a free connection string from https://cloud.mongodb.com (M0 free
-# tier, 512MB, no time limit) -- see README.md for the exact setup steps.
+# Database (MongoDB Atlas)
 # ---------------------------------------------------------------------------
 MONGODB_URI: str | None = _env("MONGODB_URI")
 MONGODB_DB_NAME: str = _env("MONGODB_DB_NAME", "quizbot")
@@ -91,33 +87,58 @@ PLANS: dict[str, dict] = {
 }
 
 # ---------------------------------------------------------------------------
-# PDF generation microservice (optional external service)
+# PDF generation microservice
 # ---------------------------------------------------------------------------
 PDF_API_BASE: str | None = _env("PDF_API_BASE")
 
 # ---------------------------------------------------------------------------
 # Quiz Player Mini App (Telegram WebApp)
 # ---------------------------------------------------------------------------
-# The public HTTPS domain the Mini App is served from (e.g.
-# "https://play.example.com") -- Telegram WebApp buttons REQUIRE a public
-# HTTPS URL, so this must be reachable from the internet in production (a
-# reverse proxy/tunnel in front of MINI_APP_HOST:MINI_APP_PORT). Leave blank
-# to disable the "Play" buttons entirely (the bots skip adding them, and
-# the server itself just won't be linked from anywhere).
 MINI_APP_DOMAIN: str | None = _env("MINI_APP_DOMAIN")
 MINI_APP_HOST: str = _env("MINI_APP_HOST", "0.0.0.0")
-# Heroku (and most PaaS hosts) assign a random port per dyno and put it in
-# $PORT -- the router ONLY forwards external traffic to that port, so it
-# must take priority over MINI_APP_PORT/.env when present. Locally (no
-# $PORT set) this falls back to MINI_APP_PORT / 8080 as before.
 MINI_APP_PORT: int = _env_int("PORT") or _env_int("MINI_APP_PORT", 8080)
-# Optional: gate the Mini App itself behind premium, independent of
-# individual quiz pricing. Off by default.
 MINI_APP_REQUIRE_PREMIUM: bool = _env_bool("MINI_APP_REQUIRE_PREMIUM", False)
 
 # ---------------------------------------------------------------------------
-# AI providers (fallback/default keys are opt-in via env; empty by default)
+# Multi-Engine AI Doubt Solvers (All 12 Free Platforms)
 # ---------------------------------------------------------------------------
+GROQ_API_KEY: str | None = _env("GROQ_API_KEY")
+GROQ_API_KEYS: str | None = _env("GROQ_API_KEYS")
+
+CEREBRAS_API_KEY: str | None = _env("CEREBRAS_API_KEY")
+CEREBRAS_API_KEYS: str | None = _env("CEREBRAS_API_KEYS")
+
+SAMBANOVA_API_KEY: str | None = _env("SAMBANOVA_API_KEY")
+SAMBANOVA_API_KEYS: str | None = _env("SAMBANOVA_API_KEYS")
+
+MISTRAL_API_KEY: str | None = _env("MISTRAL_API_KEY")
+MISTRAL_API_KEYS: str | None = _env("MISTRAL_API_KEYS")
+
+OPENROUTER_API_KEY: str | None = _env("OPENROUTER_API_KEY")
+OPENROUTER_API_KEYS: str | None = _env("OPENROUTER_API_KEYS")
+
+GITHUB_TOKEN: str | None = _env("GITHUB_TOKEN")
+GITHUB_MODELS_KEYS: str | None = _env("GITHUB_MODELS_KEYS")
+
+HF_TOKEN: str | None = _env("HF_TOKEN")
+HUGGINGFACE_API_KEYS: str | None = _env("HUGGINGFACE_API_KEYS")
+
+DEEPINFRA_API_KEY: str | None = _env("DEEPINFRA_API_KEY")
+DEEPINFRA_API_KEYS: str | None = _env("DEEPINFRA_API_KEYS")
+
+TOGETHER_API_KEY: str | None = _env("TOGETHER_API_KEY")
+TOGETHER_API_KEYS: str | None = _env("TOGETHER_API_KEYS")
+
+CLOUDFLARE_API_TOKEN: str | None = _env("CLOUDFLARE_API_TOKEN")
+CLOUDFLARE_ACCOUNT_ID: str | None = _env("CLOUDFLARE_ACCOUNT_ID")
+
+GEMINI_API_KEY: str | None = _env("GEMINI_API_KEY")
+GEMINI_API_KEYS: str | None = _env("GEMINI_API_KEYS")
+
+CO_API_KEY: str | None = _env("CO_API_KEY")
+COHERE_API_KEYS: str | None = _env("COHERE_API_KEYS")
+
+# Fallback & Legacy Endpoints
 OPENROUTER_DEFAULT_KEYS: list[str] = [
     k for k in _env("OPENROUTER_DEFAULT_KEYS", "").split(",") if k
 ]
@@ -131,21 +152,13 @@ POLLINATIONS_URL: str = _env("POLLINATIONS_URL", "https://text.pollinations.ai/o
 # ---------------------------------------------------------------------------
 # Rate limiting / quiz tuning
 # ---------------------------------------------------------------------------
-# Runner Bot's general-purpose rate limiter (its rate limiting was a single
-# generic window/max-requests pair in the original, unlike the Creator Bot's
-# three named buckets below).
 RATE_LIMIT_WINDOW: int = _env_int("RATE_LIMIT_WINDOW", 60)
 RATE_LIMIT_MAX_REQUESTS: int = _env_int("RATE_LIMIT_MAX_REQUESTS", 20)
 SESSION_TIMEOUT: int = _env_int("SESSION_TIMEOUT", 3600)
 SESSION_CLEANUP_INTERVAL: int = _env_int("SESSION_CLEANUP_INTERVAL", 600)
-# Matches the original quiz2.py hardcoded value: answers faster than this
-# many seconds (and wrong) count toward the anti-cheat flag.
 CHEAT_SPEED_THRESHOLD: float = float(_env("CHEAT_SPEED_THRESHOLD", "3.0"))
 WATCHDOG_INTERVAL: int = _env_int("WATCHDOG_INTERVAL", 300)
 
-# Creator Bot's three named rate-limit buckets (hits, window_seconds).
-# Defaults match the original adv2.py's hardcoded RATE_LIMITS exactly:
-#   default: 10 commands / 30 min, create: 4 / 30 min, strict: 1 / 60 min.
 CREATOR_RATE_LIMIT_DEFAULT: tuple[int, int] = (
     _env_int("CREATOR_RATE_LIMIT_DEFAULT_HITS", 10),
     _env_int("CREATOR_RATE_LIMIT_DEFAULT_WINDOW", 1800),
@@ -164,10 +177,14 @@ QUESTIONS_PER_PAGE: int = _env_int("QUESTIONS_PER_PAGE", 10)
 LEADERS_PAGE_SIZE: int = _env_int("LEADERS_PAGE_SIZE", 20)
 CACHE_EXPIRY: int = _env_int("CACHE_EXPIRY", 600)
 
-SUPPORTED_AI_PROVIDERS: list[str] = ["gemini", "groq", "openrouter", "openai", "mistral", "pollinations"]
+SUPPORTED_AI_PROVIDERS: list[str] = [
+    "gemini", "groq", "cerebras", "sambanova", "mistral",
+    "openrouter", "github", "huggingface", "deepinfra",
+    "together", "cloudflare", "cohere"
+]
 
 # ---------------------------------------------------------------------------
-# Local storage directories (relative to project root)
+# Local storage directories
 # ---------------------------------------------------------------------------
 DATA_DIR: Path = _ROOT / "data"
 CACHE_DIR: Path = DATA_DIR / "cache"
@@ -178,19 +195,13 @@ for _d in (DATA_DIR, CACHE_DIR, TEMP_DIR):
 
 
 def validate(bot: str = "both") -> list[str]:
-    """Return a list of human-readable problems with the current config.
-
-    `bot` may be 'creator', 'runner', 'miniapp', or 'both' to scope which
-    token is required.
-    """
+    """Return a list of human-readable problems with the current config."""
     problems = []
     if not MONGODB_URI:
         problems.append("MONGODB_URI is not set (get a free connection string from https://cloud.mongodb.com)")
     if bot == "miniapp":
-        # The Mini App only needs to verify initData signed by whichever bot
-        # opened it, so at least one token is enough (not both).
         if not CREATOR_BOT_TOKEN and not RUNNER_BOT_TOKEN:
-            problems.append("CREATOR_BOT_TOKEN or RUNNER_BOT_TOKEN must be set (Mini App verifies initData against one of them)")
+            problems.append("CREATOR_BOT_TOKEN or RUNNER_BOT_TOKEN must be set")
         return problems
     if not API_ID or not API_HASH:
         problems.append("API_ID / API_HASH are required (get them from my.telegram.org)")
