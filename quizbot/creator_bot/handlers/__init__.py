@@ -5,24 +5,32 @@ from pyrogram import Client
 
 logger = logging.getLogger(__name__)
 
+# List all handler modules present in quizbot/creator_bot/handlers/
+HANDLER_MODULES = [
+    "admin",
+    "quiz_creation",
+    "quiz_management",  # or whatever your quiz listing file is named
+    "auth",
+    "batches",
+    "file_import",
+    "payments",
+]
+
 
 def register(app: Client) -> None:
-    try:
-        from . import admin
-        admin.register(app)
-        logger.info("Registered: admin handler")
-    except Exception as e:
-        logger.error("Failed to register admin handler: %s", e)
-
-    # Register remaining handlers safely
-    for name in ("quiz_creation", "auth", "batches", "file_import", "payments"):
+    for name in HANDLER_MODULES:
         try:
             mod = __import__(f"quizbot.creator_bot.handlers.{name}", fromlist=[name])
             if hasattr(mod, "register"):
                 mod.register(app)
-                logger.info("Registered: %s handler", name)
+                logger.info("Successfully registered handler: %s", name)
+            else:
+                logger.warning("Module %s has no register() function", name)
+        except ModuleNotFoundError:
+            # File doesn't exist under this exact name, skip quietly
+            pass
         except Exception as e:
-            logger.warning("Optional handler skipped (%s): %s", name, e)
+            logger.error("Failed to load handler module '%s': %s", name, e, exc_info=True)
 
 
 register_all_handlers = register
