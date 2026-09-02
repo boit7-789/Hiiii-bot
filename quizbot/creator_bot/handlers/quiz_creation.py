@@ -7,7 +7,9 @@ The codebase has been reviewed and verified with the assistance of Claude AI.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Optional
 
 from pyrogram import Client, filters
@@ -20,6 +22,7 @@ from pyrogram.types import (
 )
 
 from quizbot.database import CreatorSettingsRepository, QuizRepository, UserRepository, get_db
+from quizbot.runner_bot.ai_key_manager import ai_engine
 from quizbot.shared import config
 from quizbot.shared.mini_app_link import mini_app_web_app_button
 from quizbot.shared.utils import is_premium_user
@@ -34,13 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def _poll_text(value) -> Optional[str]:
-    """Unwrap a poll's question/option/explanation field to a plain str.
-
-    Newer Pyrogram forks (Kurigram) return these as `FormattedText` objects
-    (with a `.text` attribute + entities) instead of a bare `str`, so any
-    downstream `re.sub`/string handling breaks with a TypeError unless we
-    normalize here first. Handles both the old (str) and new (FormattedText)
-    shapes, plus a plain None."""
+    """Unwrap a poll's question/option/explanation field to a plain str."""
     if value is None:
         return None
     text = getattr(value, "text", None)
@@ -58,7 +55,7 @@ _RESERVED_COMMANDS = [
     "search", "auth", "pay", "setpromo", "setkey", "mykeys", "delkey", "settings",
     "batch", "createbatch", "searchbatch", "stopedit", "whtml", "testseries",
     "tsr", "mocktest", "features", "gcast", "stopcast", "statses", "testapi",
-    "leaders", "aspirants", "limit", "listquiz", "removeuser",
+    "leaders", "aspirants", "limit", "listquiz", "removeuser", "aiquiz",
 ]
 
 MIN_QUESTIONS = 10
@@ -75,13 +72,11 @@ def _gen_qid() -> str:
 
 @ratelimit("create")
 async def create_cmd(c: Client, m: Message) -> None:
-    """/create -- start a new quiz-creation session. Sends questions,
-    forwarded quiz polls, or a .txt file next; finish with /done."""
+    """/create -- start a new quiz-creation session."""
     if await subscribe_gate(c, m):
         return
     uid = m.from_user.id
     if not await is_premium_user(uid):
-        from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("💬 Contact Owner for Access", url="https://t.me/cuetchampion")]]
         )
@@ -114,10 +109,107 @@ async def cancel_cmd(c: Client, m: Message) -> None:
 
 
 @ratelimit("create")
+async def aiquiz_cmd(c: Client, m: Message) -> None:
+    """
+    /aiquiz <topic> -- Generate 5 MCQ questions automatically using
+    the multi-engine AI pool (configured via Railway env variables).
+    """
+    if await subscribe_gate(c, m):
+        return
+
+    uid = m.from_user.id
+    if not await is_premium_user(uid):
+        await m.reply("🔒 Purchase premium or contact owner for access.")
+        return
+
+    topic = " ".join(m.command[1:]).strip() if len(m.command) > 1 else ""
+    if not topic:
+        await m.reply(
+            "💡 **How to use /aiquiz:**\n\n"
+            "• `/aiquiz Indian Polity Fundamental Rights`\n"
+            "• `/aiquiz Modern Physics Photoelectric Effect`\n\n"
+            "If you are in a `/create` session, generated questions are added directly to your quiz."
+        )
+        return
+
+    status = await m.reply(f"⚡ *Generating 5 high-yield MCQs for:* `{topic}`...")
+
+    prompt = (
+        f"You are a professional competitive exam question creator.\n"
+        f"Generate exactly 5 high-quality multiple choice questions on: {topic}.\n"
+        f"Rules:\n"
+        f"1. Each question must have exactly 4 options.\n"
+        f"2. Provide correct_option_id as an integer (0 for A, 1 for B, 2 for C, 3 for D).\n"
+        f"3. Keep the explanation crisp and under 50 words.\n"
+        f"4. Respond with ONLY valid JSON array. No explanations, no markdown ticks.\n\n"
+        f"Format:\n"
+        f"[\n"
+        f"  {{\n"
+        f'    "question": "Question text here?",\n'
+        f'    "options": ["Option A", "Option B", "Option C", "Option D"],\n'
+        f'    "correct_option_id": 0,\n'
+        f'    "explanation": "Why this option is correct."\n'
+        f"  }}\n"
+        f"]"
+    )
+
+    try:
+        raw_output = await ai_engine.ask_fast(prompt)
+        # Strip potential markdown code blocks like ```json ... ```
+        cleaned_json = re.sub(r"^```(?:json)?|```$", "", raw_output.strip(), flags=re.MULTILINE).strip()
+        data = json.loads(cleaned_json)
+        if not isinstance(data, list):
+            raise ValueError("Expected a JSON list of questions.")
+    except Exception as exc:
+        logger.error("Failed to generate AI quiz: %s", exc)
+        await status.edit_text(f"❌ Failed to generate questions from AI.\nError: `{str(exc)[:100]}`")
+        return
+
+    # If the user is currently creating a quiz, append the questions to that session
+    if uid in state.quiz_creation and not state.quiz_creation[uid].get("awaiting_name"):
+        added = 0
+        for item in data:
+            q_text = item.get("question")
+            opts = item.get("options", [])
+            cid = item.get("correct_option_id", 0)
+            exp = item.get("explanation")
+            if q_text and len(opts) >= 2:
+                state.quiz_creation[uid]["questions"].append({
+                    "question": q_text,
+                    "options": opts,
+                    "correct_option_id": cid,
+                    "explanation": exp,
+                    "file_id": None,
+                    "reply_text": None,
+                })
+                added += 1
+
+        total = len(state.quiz_creation[uid]["questions"])
+        await status.edit_text(
+            f"✅ **{added} AI-generated questions added!**\n"
+            f"Total questions in current quiz: **{total}**\n\n"
+            f"Send more questions, another `/aiquiz <topic>`, or finish with `/done`."
+        )
+        return
+
+    # If not in /create session, display the generated questions cleanly in the chat
+    preview_lines = [f"🎯 **AI Quiz on: {topic}**\n"]
+    for i, q in enumerate(data, 1):
+        preview_lines.append(f"**Q{i}. {q.get('question')}**")
+        for idx, opt in enumerate(q.get("options", [])):
+            check = "✅ " if idx == q.get("correct_option_id", 0) else "• "
+            preview_lines.append(f"  {check}{opt}")
+        if q.get("explanation"):
+            preview_lines.append(f"  💡 *{q.get('explanation')}*")
+        preview_lines.append("")
+
+    preview_lines.append("👉 *Use `/create` first if you want to bundle these directly into a quiz!*")
+    await status.edit_text("\n".join(preview_lines))
+
+
+@ratelimit("create")
 async def done_cmd(c: Client, m: Message) -> None:
-    """/done -- finish and save the quiz being created (needs >= 10
-    questions). Offers a Quick Save shortcut when the creator has saved
-    defaults (see /settings)."""
+    """/done -- finish and save the quiz being created (needs >= 10 questions)."""
     uid = m.from_user.id
     if not await is_premium_user(uid):
         await m.reply("🔒 Purchase premium: /pay")
@@ -172,10 +264,7 @@ async def _finalize_quiz(
     timer: int,
     from_user_name: str,
 ) -> None:
-    """Save the in-progress quiz to the database and report the result.
-    `reply_target` is either a Message (creation flow) or a CallbackQuery
-    (Quick Save flow) -- we normalize both to a coroutine that sends text.
-    """
+    """Save the in-progress quiz to the database and report the result."""
     is_message = isinstance(reply_target, Message)
 
     async def send_result(text: str, kb: Optional[InlineKeyboardMarkup] = None):
@@ -226,11 +315,11 @@ async def _finalize_quiz(
     promo_flag = "Set" if promo else "None"
     text = (
         f"> 🎉 **Quiz Created!**\n\n"
-        f"\U0001F4DD **Name:** {quiz_name}\n"
+        f"📝 **Name:** {quiz_name}\n"
         f"❓ **Questions:** {len(quiz['questions'])}\n"
         f"⏱️ **Timer:** {timer}s\n"
         f"🆔 **Quiz ID:** `{qid}`\n"
-        f"\U0001F3F7 **Type:** `{quiz_type}`\n"
+        f"🏷️ **Type:** `{quiz_type}`\n"
         f"🪭 **Promo:** {promo_flag}\n"
         f"👨‍💼 **Creator:** `{from_user_name}`"
     )
@@ -249,10 +338,6 @@ async def _finalize_quiz(
         [InlineKeyboardButton("👥 Add to Group", url=f"https://t.me/{me.username}?startgroup={qid}")],
         [InlineKeyboardButton("🔗 Share", switch_inline_query=qid)],
     ]
-    # "Play" opens the visual Mini App player right here in this private
-    # chat -- a native web_app button, which Telegram only allows on
-    # messages sent directly to the user (exactly this context). Skipped
-    # entirely when MINI_APP_DOMAIN isn't configured.
     play_practice = mini_app_web_app_button(me.username, qid, "practice", "Play (Practice)")
     play_exam = mini_app_web_app_button(me.username, qid, "exam", "Play (Exam)")
     if play_practice and play_exam:
@@ -271,8 +356,7 @@ async def _finalize_quiz(
 
 
 async def quicksave_cb(c: Client, cb: CallbackQuery) -> None:
-    """`qd_use_<uid>` / `qd_manual_<uid>` -- Quick Save decision after
-    /done when the creator has saved quiz defaults."""
+    """`qd_use_<uid>` / `qd_manual_<uid>` -- Quick Save decision after /done."""
     uid = cb.from_user.id
     action = cb.data.split("_")[1]
     target = int(cb.data.split("_")[2])
@@ -320,8 +404,7 @@ async def quicksave_cb(c: Client, cb: CallbackQuery) -> None:
 
 
 async def handle_document(c: Client, m: Message) -> None:
-    """Handle a .txt/.json file sent while a quiz-creation session is
-    active -- imports questions in bulk (see handlers/file_import.py)."""
+    """Handle a .txt/.json file sent while a quiz-creation session is active."""
     uid = m.from_user.id
     if not await is_premium_user(uid):
         return
@@ -347,13 +430,11 @@ async def handle_document(c: Client, m: Message) -> None:
         await status.edit_text(f"❌ Error: {error}")
     else:
         total = len(state.quiz_creation[uid]["questions"])
-        await status.edit_text(f"✅ {count} questions processed! Total: {total}\nSend more or /done")
+        await status.edit_text(f"✅ {count} questions processed! Total: {total}\nSend more, /aiquiz, or /done")
 
 
 async def handle_creation_message(c: Client, m: Message) -> None:
-    """Drives every text/poll step of the quiz-creation wizard: quiz name,
-    section setup, promo message, type selection, and free-text question
-    parsing (paste format or forwarded quiz polls)."""
+    """Drives every text/poll step of the quiz-creation wizard."""
     uid, cid = m.from_user.id, m.chat.id
     if uid not in state.quiz_creation:
         return
@@ -368,19 +449,8 @@ async def handle_creation_message(c: Client, m: Message) -> None:
         remove_words = user.get("remove_words", [])
         question = strip_source_noise(filter_words(_poll_text(poll.question), remove_words))
         options = [filter_words(_poll_text(o.text), remove_words) for o in poll.options]
-        # Confirmed via live log against this Kurigram build: a closed quiz
-        # poll (the normal state of a poll someone forwards to the bot)
-        # exposes the correct answer as `correct_option_id` -- SINGULAR,
-        # a plain int -- not `correct_option_ids` (plural/list). The plural
-        # attribute simply doesn't exist on this object at all, so the
-        # previous getattr(poll, "correct_option_ids", ...) silently and
-        # always fell through to 0, which is why every imported poll ended
-        # up marking option 1 (index 0) as correct regardless of the
-        # poll's real checkmark.
         correct_id = getattr(poll, "correct_option_id", None)
         if correct_id is None:
-            # Defensive fallback for any future/older Kurigram build that
-            # instead reports the plural, list-shaped attribute.
             correct_ids = getattr(poll, "correct_option_ids", None) or []
             correct_id = correct_ids[0] if correct_ids else 0
         explanation = None
@@ -401,7 +471,7 @@ async def handle_creation_message(c: Client, m: Message) -> None:
                 "explanation": explanation, "file_id": file_id, "reply_text": reply_text,
             }
         )
-        await m.reply(f"✅ {len(ud['questions'])} saved! Send more or /done")
+        await m.reply(f"✅ {len(ud['questions'])} saved! Send more, /aiquiz, or /done")
         return
 
     if not m.text:
@@ -414,7 +484,7 @@ async def handle_creation_message(c: Client, m: Message) -> None:
             return
         ud["quiz_name"] = name
         ud["awaiting_name"] = False
-        await m.reply(f"📝 Name: **{name}**\nSend questions, forward quiz polls, or a .txt file. /cancel to abort.")
+        await m.reply(f"📝 Name: **{name}**\nSend questions, forward quiz polls, use `/aiquiz <topic>`, or upload a .txt file. /cancel to abort.")
         return
 
     if ud.get("awaiting_section_choice"):
@@ -530,7 +600,7 @@ async def handle_creation_message(c: Client, m: Message) -> None:
         return
 
     if ud.get("awaiting_default_text_confirm"):
-        return  # handled via the dtc_yes/dtc_no callback
+        return
 
     if ud.get("awaiting_type"):
         quiz_type = m.text.strip().lower()
@@ -582,8 +652,7 @@ async def handle_creation_message(c: Client, m: Message) -> None:
 
 
 async def default_text_confirm_cb(c: Client, cb: CallbackQuery) -> None:
-    """`dtc_yes_<uid>` / `dtc_no_<uid>` -- confirm whether to apply the
-    creator's saved default text before proceeding to type selection."""
+    """`dtc_yes_<uid>` / `dtc_no_<uid>` -- confirm default text."""
     uid = cb.from_user.id
     action = cb.data.split("_")[1]
     if uid not in state.quiz_creation:
@@ -608,6 +677,7 @@ def in_quiz_creation_filter():
 
 def register(app: Client) -> None:
     app.on_message(filters.command("create") & filters.private)(create_cmd)
+    app.on_message(filters.command("aiquiz") & filters.private)(aiquiz_cmd)
     app.on_message(filters.command("done") & filters.private)(done_cmd)
     app.on_message(filters.command("cancel") & filters.private)(cancel_cmd)
     app.on_callback_query(filters.regex(r"^qd_(use|manual)_\d+$"))(quicksave_cb)
