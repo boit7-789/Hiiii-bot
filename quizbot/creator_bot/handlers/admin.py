@@ -7,41 +7,101 @@ The codebase has been reviewed and verified with the assistance of Claude AI.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
-from quizbot.database import UserRepository, get_db
+from quizbot.database import (
+    QuizRepository,
+    UserRepository,
+    get_db,
+)
 from quizbot.shared import config
+from quizbot.shared.utils import is_premium_user
 
-from .. import state
+from .. import keyboards, state
 from ..ratelimit import ratelimit
+from ..subscribe_gate import subscribe_gate
 
 logger = logging.getLogger(__name__)
 
 
-def is_admin(user_id: int) -> bool:
-    return (
-        user_id == config.OWNER_ID
-        or user_id in config.ADMIN_IDS
-    )
+def _is_owner(uid: int) -> bool:
+    return uid == config.OWNER_ID or uid in config.ADMIN_IDS
 
 
 @ratelimit("default")
-async def limit_cmd(c: Client, m: Message) -> None:
-    """/limit -- show rate-limit status for the user."""
+async def start_cmd(c: Client, m: Message) -> None:
+    if await subscribe_gate(c, m):
+        return
     user = m.from_user
     if user is None:
         return
 
-    # Check if user is Owner or Admin
-    if is_admin(user.id):
+    # Track user in database
+    try:
+        user_repo = UserRepository(get_db())
+        await user_repo.ensure_user(user.id, user.username or "", user.first_name or "")
+    except Exception:
+        logger.debug("Failed to record user %s in db", user.id, exc_info=True)
+
+    text = (
+        f"👋 Hello, **{user.first_name}**!\n\n"
+        "Welcome to the **Advance Quiz Bot** Creator panel.\n\n"
+        "Here you can create, edit, manage, and share quizzes with your students or group members.\n\n"
+        "Use the menu buttons below to get started:"
+    )
+    kb = keyboards.start_menu_keyboard(is_admin=_is_owner(user.id))
+    await m.reply(text, reply_markup=kb)
+
+
+@ratelimit("default")
+async def help_cmd(c: Client, m: Message) -> None:
+    if await subscribe_gate(c, m):
+        return
+    text = (
+        "📚 **Quiz Creator Bot Commands:**\n\n"
+        "• /create — Start interactive quiz creation\n"
+        "• /done — Finish and save a quiz in progress\n"
+        "• /cancel — Cancel current quiz creation\n"
+        "• /myquizzes — View and manage your created quizzes\n"
+        "• /edit — Edit an existing quiz\n"
+        "• /import — Import questions from files (TXT/CSV/JSON/PDF)\n"
+        "• /batch — Manage quiz batches\n"
+        "• /limit — Check your command quota\n"
+    )
+    if _is_owner(m.from_user.id):
+        text += (
+            "\n👑 **Owner / Admin Commands:**\n"
+            "• /admin — Open admin control panel\n"
+            "• /auth <id> <duration> <unit> — Grant premium access\n"
+            "• /removeuser <id> — Revoke premium access\n"
+            "• /broadcast — Broadcast message to all users\n"
+            "• /stats — View bot statistics\n"
+        )
+    await m.reply(text)
+
+
+@ratelimit("default")
+async def limit_cmd(c: Client, m: Message) -> None:
+    user = m.from_user
+    if user is None:
+        return
+
+    # Unlimited for Owner and Admins
+    if _is_owner(user.id):
         await m.reply(
             "👑 **Admin / Owner Status:**\n\n"
             "✨ **Unlimited Access Active**\n"
-            "• All command rate limits are disabled for you.\n"
-            "• You have unrestricted creation and execution limits."
+            "• All command rate limits are bypassed.\n"
+            "• Unrestricted quiz creation and execution."
         )
         return
 
@@ -63,9 +123,95 @@ async def limit_cmd(c: Client, m: Message) -> None:
     await m.reply("\n".join(lines))
 
 
+@ratelimit("default")
+async def admin_panel_cmd(c: Client, m: Message) -> None:
+    uid = m.from_user.id
+    if not _is_owner(uid):
+        await m.reply("⛔ This command is restricted to the Bot Owner and Admins.")
+        return
+
+    buttons = [
+        [
+            InlineKeyboardButton("📊 Bot Stats", callback_data="admin_stats"),
+            InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast_help"),
+        ],
+        [
+            InlineKeyboardButton("🔒 Close", callback_data="admin_close"),
+        ],
+    ]
+    await m.reply(
+        "🛠 **Admin Control Panel**\n\nChoose an action from the buttons below:",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+
+
+async def admin_callback(c: Client, cq: CallbackQuery) -> None:
+    uid = cq.from_user.id
+    if not _is_owner(uid):
+        await cq.answer("Owner only.", show_alert=True)
+        return
+
+    data = cq.data
+    if data == "admin_stats":
+        repo = UserRepository(get_db())
+        quiz_repo = QuizRepository(get_db())
+        total_users = await repo.count_users()
+        premium_users = await repo.count_premium_users()
+        total_quizzes = await quiz_repo.count_all()
+
+        text = (
+            "📊 **Live System Statistics**\n\n"
+            f"• **Total Registered Users:** `{total_users}`\n"
+            f"• **Authorized / Premium Users:** `{premium_users}`\n"
+            f"• **Total Quizzes Created:** `{total_quizzes}`\n"
+        )
+        await cq.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back")],
+            ]),
+        )
+        await cq.answer()
+
+    elif data == "admin_broadcast_help":
+        text = (
+            "📢 **Broadcast Instructions:**\n\n"
+            "To send a broadcast to all users, use:\n"
+            "`/broadcast <your message>`\n\n"
+            "Or reply directly to any text, photo, or document message with `/broadcast`."
+        )
+        await cq.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔙 Back to Admin", callback_data="admin_back")],
+            ]),
+        )
+        await cq.answer()
+
+    elif data == "admin_back":
+        buttons = [
+            [
+                InlineKeyboardButton("📊 Bot Stats", callback_data="admin_stats"),
+                InlineKeyboardButton("📢 Broadcast", callback_data="admin_broadcast_help"),
+            ],
+            [
+                InlineKeyboardButton("🔒 Close", callback_data="admin_close"),
+            ],
+        ]
+        await cq.message.edit_text(
+            "🛠 **Admin Control Panel**\n\nChoose an action from the buttons below:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        await cq.answer()
+
+    elif data == "admin_close":
+        await cq.message.delete()
+        await cq.answer()
+
+
+@ratelimit("default")
 async def broadcast_cmd(c: Client, m: Message) -> None:
-    """/broadcast <message> -- (admin only) broadcast to all bot users."""
-    if m.from_user is None or not is_admin(m.from_user.id):
+    if m.from_user is None or not _is_owner(m.from_user.id):
         return
 
     reply = m.reply_to_message
@@ -90,30 +236,38 @@ async def broadcast_cmd(c: Client, m: Message) -> None:
             else:
                 await c.send_message(uid, text)
             sent += 1
+            await asyncio.sleep(0.05)
         except Exception:
             failed += 1
 
     await status_msg.edit_text(f"Broadcast complete.\nSent: {sent}\nFailed/Blocked: {failed}")
 
 
+@ratelimit("default")
 async def stats_cmd(c: Client, m: Message) -> None:
-    """/stats -- (admin only) display basic bot statistics."""
-    if m.from_user is None or not is_admin(m.from_user.id):
+    if m.from_user is None or not _is_owner(m.from_user.id):
         return
 
     repo = UserRepository(get_db())
+    quiz_repo = QuizRepository(get_db())
     total_users = await repo.count_users()
     premium_users = await repo.count_premium_users()
+    total_quizzes = await quiz_repo.count_all()
 
     text = (
         "📊 **Bot Statistics**\n\n"
         f"• Total Users: {total_users}\n"
         f"• Premium Users: {premium_users}\n"
+        f"• Total Quizzes: {total_quizzes}\n"
     )
     await m.reply(text)
 
 
 def register(app: Client) -> None:
+    app.on_message(filters.command("start") & filters.private)(start_cmd)
+    app.on_message(filters.command("help") & filters.private)(help_cmd)
     app.on_message(filters.command("limit") & filters.private)(limit_cmd)
+    app.on_message(filters.command("admin") & filters.private)(admin_panel_cmd)
     app.on_message(filters.command("broadcast") & filters.private)(broadcast_cmd)
     app.on_message(filters.command("stats") & filters.private)(stats_cmd)
+    app.on_callback_query(filters.regex(r"^admin_"))(admin_callback)
