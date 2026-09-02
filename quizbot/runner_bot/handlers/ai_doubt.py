@@ -5,35 +5,10 @@ from telegram import Update
 from telegram.constants import ParseMode, ChatAction
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-from ..ai_key_manager import ai_key_pool
+from ..ai_key_manager import ai_engine
 from ..telegram_utils import safe_send_message
 
 logger = logging.getLogger(__name__)
-
-
-async def call_ai_with_fallback(prompt: str) -> str:
-    """Calls Gemini rotating through keys on 429/failures."""
-    keys = ai_key_pool.get_all_keys()
-    if not keys:
-        return "⚠️ No AI API keys configured. Set GEMINI_API_KEYS in config."
-
-    last_error = ""
-    for api_key in keys:
-        try:
-            from google import genai
-            client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-            )
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            last_error = str(e)
-            logger.warning("API key failed, switching to next key. Error: %s", e)
-            continue
-
-    return f"❌ All AI API keys exhausted or rate-limited. Error: {last_error[:100]}"
 
 
 async def aidoubt_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -78,9 +53,10 @@ async def aidoubt_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> Non
         prompt += "Explain this question/concept, clarify the correct answer, and explain why other options are incorrect.\n"
 
     await ctx.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-    status_msg = await safe_send_message(ctx, chat_id, "🤔 <i>Thinking...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await safe_send_message(ctx, chat_id, "⚡ <i>Analyzing doubt...</i>", parse_mode=ParseMode.HTML)
 
-    explanation = await call_ai_with_fallback(prompt)
+    # Concurrently race all available configured providers
+    explanation = await ai_engine.ask_fast(prompt)
 
     final_text = f"💡 <b>Doubt Clarification:</b>\n\n{explanation}"
     if status_msg:
