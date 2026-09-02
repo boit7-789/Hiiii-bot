@@ -13,15 +13,18 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 # Temporary in-memory store for scorecard delivery (zero DB writes)
-# Key: quiz_id (str) -> Value: {user_id (int): {qname, correct, wrong, score, total, time_str}}
 temp_scorecards: dict[str, dict[int, dict]] = {}
 
 # Pending settings for quiz creation / setup wizard
 pending_quiz_settings: dict[int, dict[str, Any]] = {}
 
-# Active AI provider fallback state & ongoing AI sessions
+# AI & Special Handler Session Stores
 last_working_ai: dict[str, Any] = {}
 AI_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
+PDF_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
+MIX_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
+POLL_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
+SCHEDULE_QUIZ_SESSIONS: dict[int, dict[str, Any]] = {}
 
 
 class SessionManager:
