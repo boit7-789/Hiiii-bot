@@ -81,10 +81,17 @@ async def create_cmd(c: Client, m: Message) -> None:
         return
     uid = m.from_user.id
     if not await is_premium_user(uid):
-        await m.reply("🔒 Purchase premium: /pay")
-        return
-    if uid in state.quiz_creation:
-        await m.reply("⚠️ Already creating a quiz. Use /done or /cancel.")
+        from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("💬 Contact Owner for Access", url="https://t.me/cuetchampion")]]
+        )
+        await m.reply(
+            "🔒 **Access Restricted**\n\n"
+            "This bot is private and requires manual authorization.\n\n"
+            f"📋 **Your Telegram ID:** `{uid}`\n\n"
+            "Click below to contact the owner directly to request access.",
+            reply_markup=kb,
+        )
         return
     await m.reply("📝 **Send the quiz name.**")
     state.quiz_creation[uid] = {
