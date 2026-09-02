@@ -1277,7 +1277,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                 qname = user_result["qname"]
                 acc = (corr / (corr + wrg) * 100) if (corr + wrg) else 0
 
-                msg = (
+               msg = (
                     f"📋 <b>Your Quiz Result: {qname}</b>\n\n"
                     f"👤 <b>Student:</b> {update.message.from_user.first_name}\n"
                     f"📊 <b>Total Questions:</b> {tot}\n"
@@ -1285,8 +1285,7 @@ async def start_quiz(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
                     f"✅ <b>Correct Answers:</b> {corr}\n"
                     f"❌ <b>Wrong Answers:</b> {wrg}\n"
                     f"🎯 <b>Your Score:</b> {sc:.2f}\n"
-                    f"📈 <b>Accuracy:</b> {acc:.1f}%\n\n"
-                    f"<i>Note: This is a temporary report sent privately to your DM.</i>"
+                    f"📈 <b>Accuracy:</b> {acc:.1f}%"
                 )
             else:
                 msg = (
