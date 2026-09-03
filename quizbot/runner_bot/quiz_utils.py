@@ -12,6 +12,18 @@ from typing import Any, Optional
 
 from quizbot.database import AuthChatRepository, BatchRepository, QuizRepository, get_db
 
+# Telegram's official ID for group anonymous admin actions
+ANONYMOUS_ADMIN_ID = 1087968824
+
+
+def is_anonymous_admin(user_id: Optional[int], chat_id: Optional[int] = None) -> bool:
+    """Return True if the user_id corresponds to an anonymous group administrator."""
+    if user_id == ANONYMOUS_ADMIN_ID:
+        return True
+    if chat_id is not None and user_id == chat_id:
+        return True
+    return False
+
 
 def shuffle_options(options: list[str], correct_id: int) -> tuple[list[str], int]:
     """Shuffle all options, remapping a single correct index."""
@@ -32,8 +44,8 @@ def shuffle_options_multi(
       - None or count <= 0        -> shuffle ALL options
       - count >= len(options)     -> shuffle ALL options
       - 0 < count < len(options)  -> only the first `count` positions are
-                                      shuffled; the rest stay exactly where
-                                      they were.
+                                     shuffled; the rest stay exactly where
+                                     they were.
     """
     n = len(options)
     if count is None or count <= 0 or count >= n:
@@ -98,7 +110,9 @@ async def check_batch_access(qid: str, chat_id: int, ctx=None, user_id: Optional
         batch = await batch_repo.info_for_quiz(qid)
         if has_direct:
             return {"has_access": True, "batch": batch}
-        if ctx and batch and user_id:
+
+        # Do not attempt chat member lookups for anonymous admin placeholders
+        if ctx and batch and user_id and not is_anonymous_admin(user_id, chat_id):
             for ac_chat_id in batch.get("chats", []):
                 try:
                     member = await ctx.bot.get_chat_member(ac_chat_id, user_id)
@@ -130,13 +144,17 @@ async def resolve_quiz_access(
         return True, None
 
     is_group = chat_type in ("group", "supergroup")
-    auth_repo = AuthChatRepository(get_db())
-    auth_users = await auth_repo.get(creator_id)
-    in_auth = (not is_group) and (user_id in auth_users)
-    if in_auth:
-        return True, None
+    is_anon = is_anonymous_admin(user_id, chat_id)
 
+    # In private chat or non-anonymous personal check
+    if not is_group and not is_anon:
+        auth_repo = AuthChatRepository(get_db())
+        auth_users = await auth_repo.get(creator_id)
+        if user_id in auth_users:
+            return True, None
+
+    # In groups (or when acting anonymously), evaluate the chat's authorized access
     result = await check_batch_access(
-        qid, chat_id, ctx=ctx, user_id=None if is_group else user_id
+        qid, chat_id, ctx=ctx, user_id=None if (is_group or is_anon) else user_id
     )
     return result["has_access"], result.get("batch")
