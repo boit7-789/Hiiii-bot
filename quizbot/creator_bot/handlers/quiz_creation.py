@@ -52,7 +52,6 @@ def _format_markdown_to_html(text: str) -> str:
     """Safely convert AI markdown formatting to Telegram-compatible HTML."""
     if not text:
         return ""
-    # Convert bold-italic, bold, and italic markers
     text = re.sub(r"\*\*\*(.*?)\*\*\*", r"<b><i>\1</i></b>", text)
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
@@ -92,6 +91,8 @@ async def _get_user_safely(uid: int) -> dict:
     try:
         if hasattr(repo, "get_or_create"):
             return await repo.get_or_create(uid) or {}
+        if hasattr(repo, "ensure_user"):
+            return await repo.ensure_user(uid, "", "") or {}
         if hasattr(repo, "get_user"):
             return await repo.get_user(uid) or {}
     except Exception as exc:
@@ -474,24 +475,41 @@ async def handle_document(c: Client, m: Message) -> None:
         user = await _get_user_safely(uid)
         remove_words = user.get("remove_words", [])
 
-        # Accommodate both 2-argument and 4-argument implementations safely
+        # Check parameter count and whether process_uploaded_file is a coroutine
         sig = inspect.signature(process_uploaded_file)
         param_count = len(sig.parameters)
+        is_coroutine = inspect.iscoroutinefunction(process_uploaded_file)
 
-        if param_count >= 4:
-            count, error = process_uploaded_file(
-                content,
-                m.document.file_name or "upload.txt",
-                state.quiz_creation[uid]["questions"],
-                remove_words,
-            )
-        else:
-            res, error = process_uploaded_file(content, m.document.file_name or "upload.txt")
-            if not error and isinstance(res, list):
-                state.quiz_creation[uid]["questions"].extend(res)
-                count = len(res)
+        if is_coroutine:
+            if param_count >= 4:
+                count, error = await process_uploaded_file(
+                    content,
+                    m.document.file_name or "upload.txt",
+                    state.quiz_creation[uid]["questions"],
+                    remove_words,
+                )
             else:
-                count = res if isinstance(res, int) else 0
+                res, error = await process_uploaded_file(content, m.document.file_name or "upload.txt")
+                if not error and isinstance(res, list):
+                    state.quiz_creation[uid]["questions"].extend(res)
+                    count = len(res)
+                else:
+                    count = res if isinstance(res, int) else 0
+        else:
+            if param_count >= 4:
+                count, error = process_uploaded_file(
+                    content,
+                    m.document.file_name or "upload.txt",
+                    state.quiz_creation[uid]["questions"],
+                    remove_words,
+                )
+            else:
+                res, error = process_uploaded_file(content, m.document.file_name or "upload.txt")
+                if not error and isinstance(res, list):
+                    state.quiz_creation[uid]["questions"].extend(res)
+                    count = len(res)
+                else:
+                    count = res if isinstance(res, int) else 0
 
         if error:
             await status.edit_text(f"❌ Error: {error}")
@@ -504,7 +522,10 @@ async def handle_document(c: Client, m: Message) -> None:
             )
     except Exception as exc:
         logger.exception("Failed processing uploaded document: %s", exc)
-        await status.edit_text(f"❌ Processing failed: <code>{html.escape(str(exc))}</code>", parse_mode=ParseMode.HTML)
+        await status.edit_text(
+            f"❌ Processing failed: <code>{html.escape(str(exc))}</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 async def handle_creation_message(c: Client, m: Message) -> None:
