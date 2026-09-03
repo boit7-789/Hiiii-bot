@@ -7,13 +7,15 @@ The codebase has been reviewed and verified with the assistance of Claude AI.
 
 from __future__ import annotations
 
+import html
+import inspect
 import json
 import logging
 import re
 from typing import Optional
 
 from pyrogram import Client, filters
-from pyrogram.enums import PollType
+from pyrogram.enums import ParseMode, PollType
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -46,9 +48,20 @@ def _poll_text(value) -> Optional[str]:
     return str(value)
 
 
+def _format_markdown_to_html(text: str) -> str:
+    """Safely convert AI markdown formatting to Telegram-compatible HTML."""
+    if not text:
+        return ""
+    # Convert bold-italic, bold, and italic markers
+    text = re.sub(r"\*\*\*(.*?)\*\*\*", r"<b><i>\1</i></b>", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
+    return text
+
+
 # Commands that must always be reachable even while a quiz-creation wizard
-# is in progress -- the free-text/poll catch-all handler must not swallow
-# these. Mirrors the exclusion list from the original bot's message filter.
+# is in progress -- the free-text/poll catch-all handler must not swallow these.
 _RESERVED_COMMANDS = [
     "start", "create", "myquizzes", "edit", "info", "ban", "done", "add", "rem",
     "remall", "del", "remove", "clearlist", "mywords", "help", "cancel", "quiz",
@@ -70,6 +83,22 @@ def _gen_qid() -> str:
     return "GGN" + "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
 
 
+async def _get_user_safely(uid: int) -> dict:
+    """Safely retrieve or create user without method mismatch crashes."""
+    db = get_db()
+    if not db:
+        return {}
+    repo = UserRepository(db)
+    try:
+        if hasattr(repo, "get_or_create"):
+            return await repo.get_or_create(uid) or {}
+        if hasattr(repo, "get_user"):
+            return await repo.get_user(uid) or {}
+    except Exception as exc:
+        logger.warning("Error fetching user profile for %s: %s", uid, exc)
+    return {}
+
+
 @ratelimit("create")
 async def create_cmd(c: Client, m: Message) -> None:
     """/create -- start a new quiz-creation session."""
@@ -81,14 +110,15 @@ async def create_cmd(c: Client, m: Message) -> None:
             [[InlineKeyboardButton("💬 Contact Owner for Access", url="https://t.me/cuetchampion")]]
         )
         await m.reply(
-            "🔒 **Access Restricted**\n\n"
+            "🔒 <b>Access Restricted</b>\n\n"
             "This bot is private and requires manual authorization.\n\n"
-            f"📋 **Your Telegram ID:** `{uid}`\n\n"
+            f"📋 <b>Your Telegram ID:</b> <code>{uid}</code>\n\n"
             "Click below to contact the owner directly to request access.",
             reply_markup=kb,
+            parse_mode=ParseMode.HTML,
         )
         return
-    await m.reply("📝 **Send the quiz name.**")
+    await m.reply("📝 <b>Send the quiz name.</b>", parse_mode=ParseMode.HTML)
     state.quiz_creation[uid] = {
         "questions": [],
         "timer": None,
@@ -103,7 +133,7 @@ async def cancel_cmd(c: Client, m: Message) -> None:
     uid = m.from_user.id
     if uid in state.quiz_creation:
         state.quiz_creation.pop(uid, None)
-        await m.reply("❌ Cancelled.")
+        await m.reply("❌ Quiz creation cancelled.")
     else:
         await m.reply("⚠️ Nothing to cancel.")
 
@@ -112,7 +142,7 @@ async def cancel_cmd(c: Client, m: Message) -> None:
 async def aiquiz_cmd(c: Client, m: Message) -> None:
     """
     /aiquiz <topic> -- Generate 5 MCQ questions automatically using
-    the multi-engine AI pool (configured via Railway env variables).
+    the multi-engine AI pool.
     """
     if await subscribe_gate(c, m):
         return
@@ -125,23 +155,27 @@ async def aiquiz_cmd(c: Client, m: Message) -> None:
     topic = " ".join(m.command[1:]).strip() if len(m.command) > 1 else ""
     if not topic:
         await m.reply(
-            "💡 **How to use /aiquiz:**\n\n"
-            "• `/aiquiz Indian Polity Fundamental Rights`\n"
-            "• `/aiquiz Modern Physics Photoelectric Effect`\n\n"
-            "If you are in a `/create` session, generated questions are added directly to your quiz."
+            "💡 <b>How to use /aiquiz:</b>\n\n"
+            "• <code>/aiquiz Indian Polity Fundamental Rights</code>\n"
+            "• <code>/aiquiz Modern Physics Photoelectric Effect</code>\n\n"
+            "<i>If you are in a /create session, questions are appended directly to your quiz.</i>",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    status = await m.reply(f"⚡ *Generating 5 high-yield MCQs for:* `{topic}`...")
+    status = await m.reply(
+        f"⚡ <i>Generating 5 high-yield MCQs for:</i> <b>{html.escape(topic)}</b>...",
+        parse_mode=ParseMode.HTML,
+    )
 
     prompt = (
         f"You are a professional competitive exam question creator.\n"
-        f"Generate exactly 5 high-quality multiple choice questions on: {topic}.\n"
+        f"Generate exactly 5 high-quality multiple choice questions on: '{topic}'.\n"
         f"Rules:\n"
         f"1. Each question must have exactly 4 options.\n"
         f"2. Provide correct_option_id as an integer (0 for A, 1 for B, 2 for C, 3 for D).\n"
         f"3. Keep the explanation crisp and under 50 words.\n"
-        f"4. Respond with ONLY valid JSON array. No explanations, no markdown ticks.\n\n"
+        f"4. Respond with ONLY a valid JSON array. No explanations, no markdown blocks.\n\n"
         f"Format:\n"
         f"[\n"
         f"  {{\n"
@@ -155,17 +189,19 @@ async def aiquiz_cmd(c: Client, m: Message) -> None:
 
     try:
         raw_output = await ai_engine.ask_fast(prompt)
-        # Strip potential markdown code blocks like ```json ... ```
         cleaned_json = re.sub(r"^```(?:json)?|```$", "", raw_output.strip(), flags=re.MULTILINE).strip()
         data = json.loads(cleaned_json)
         if not isinstance(data, list):
             raise ValueError("Expected a JSON list of questions.")
     except Exception as exc:
         logger.error("Failed to generate AI quiz: %s", exc)
-        await status.edit_text(f"❌ Failed to generate questions from AI.\nError: `{str(exc)[:100]}`")
+        await status.edit_text(
+            f"❌ <b>Failed to generate questions from AI.</b>\nError: <code>{html.escape(str(exc)[:100])}</code>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    # If the user is currently creating a quiz, append the questions to that session
+    # If the user is currently creating a quiz, append questions to that session
     if uid in state.quiz_creation and not state.quiz_creation[uid].get("awaiting_name"):
         added = 0
         for item in data:
@@ -186,25 +222,26 @@ async def aiquiz_cmd(c: Client, m: Message) -> None:
 
         total = len(state.quiz_creation[uid]["questions"])
         await status.edit_text(
-            f"✅ **{added} AI-generated questions added!**\n"
-            f"Total questions in current quiz: **{total}**\n\n"
-            f"Send more questions, another `/aiquiz <topic>`, or finish with `/done`."
+            f"✅ <b>{added} AI-generated questions added!</b>\n"
+            f"Total questions in current quiz: <b>{total}</b>\n\n"
+            f"Send more questions, another <code>/aiquiz &lt;topic&gt;</code>, or finish with <code>/done</code>.",
+            parse_mode=ParseMode.HTML,
         )
         return
 
-    # If not in /create session, display the generated questions cleanly in the chat
-    preview_lines = [f"🎯 **AI Quiz on: {topic}**\n"]
+    # If not in /create session, display the preview formatted as HTML
+    preview_lines = [f"🎯 <b>AI Quiz on: {html.escape(topic)}</b>\n"]
     for i, q in enumerate(data, 1):
-        preview_lines.append(f"**Q{i}. {q.get('question')}**")
+        preview_lines.append(f"<b>Q{i}. {html.escape(q.get('question', ''))}</b>")
         for idx, opt in enumerate(q.get("options", [])):
             check = "✅ " if idx == q.get("correct_option_id", 0) else "• "
-            preview_lines.append(f"  {check}{opt}")
+            preview_lines.append(f"  {check}{html.escape(str(opt))}")
         if q.get("explanation"):
-            preview_lines.append(f"  💡 *{q.get('explanation')}*")
+            preview_lines.append(f"  💡 <i>{html.escape(str(q.get('explanation')))}</i>")
         preview_lines.append("")
 
-    preview_lines.append("👉 *Use `/create` first if you want to bundle these directly into a quiz!*")
-    await status.edit_text("\n".join(preview_lines))
+    preview_lines.append("👉 <i>Use <code>/create</code> first if you want to bundle these directly into a quiz!</i>")
+    await status.edit_text("\n".join(preview_lines), parse_mode=ParseMode.HTML)
 
 
 @ratelimit("create")
@@ -244,9 +281,13 @@ async def done_cmd(c: Client, m: Message) -> None:
         )
         state.quiz_creation[uid]["_qd"] = quiz_defaults
         await m.reply(
-            f"⚡ **Quick Save available!**\n\nType: `{typ}`\nPromo: `{promo_preview}`\nSections: `{section}`\n\n"
+            f"⚡ <b>Quick Save available!</b>\n\n"
+            f"Type: <code>{typ}</code>\n"
+            f"Promo: <code>{html.escape(promo_preview)}</code>\n"
+            f"Sections: <code>{section}</code>\n\n"
             f"Use the saved config, or set up manually?",
             reply_markup=kb,
+            parse_mode=ParseMode.HTML,
         )
         return
 
@@ -269,11 +310,11 @@ async def _finalize_quiz(
 
     async def send_result(text: str, kb: Optional[InlineKeyboardMarkup] = None):
         if is_message:
-            return await reply_target.reply(text, reply_markup=kb)
+            return await reply_target.reply(text, reply_markup=kb, parse_mode=ParseMode.HTML)
         try:
-            return await reply_target.message.edit_text(text, reply_markup=kb)
+            return await reply_target.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
         except Exception:
-            return await reply_target.message.reply(text, reply_markup=kb)
+            return await reply_target.message.reply(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
     quiz_name = state.quiz_creation[uid]["quiz_name"]
     questions = state.quiz_creation[uid]["questions"]
@@ -314,20 +355,20 @@ async def _finalize_quiz(
 
     promo_flag = "Set" if promo else "None"
     text = (
-        f"> 🎉 **Quiz Created!**\n\n"
-        f"📝 **Name:** {quiz_name}\n"
-        f"❓ **Questions:** {len(quiz['questions'])}\n"
-        f"⏱️ **Timer:** {timer}s\n"
-        f"🆔 **Quiz ID:** `{qid}`\n"
-        f"🏷️ **Type:** `{quiz_type}`\n"
-        f"🪭 **Promo:** {promo_flag}\n"
-        f"👨‍💼 **Creator:** `{from_user_name}`"
+        f"🎉 <b>Quiz Created Successfully!</b>\n\n"
+        f"📝 <b>Name:</b> {html.escape(quiz_name)}\n"
+        f"❓ <b>Questions:</b> <code>{len(quiz['questions'])}</code>\n"
+        f"⏱️ <b>Timer:</b> <code>{timer}s</code>\n"
+        f"🆔 <b>Quiz ID:</b> <code>{qid}</code>\n"
+        f"🏷️ <b>Type:</b> <code>{quiz_type}</code>\n"
+        f"🪭 <b>Promo:</b> <code>{promo_flag}</code>\n"
+        f"👨‍💼 <b>Creator:</b> <code>{html.escape(from_user_name)}</code>"
     )
     if sections:
-        text += "\n\n**Sections:**"
+        text += "\n\n<b>Sections:</b>"
         for i, sec in enumerate(sections, 1):
             text += (
-                f"\n\nSection {i}: {sec['name']}\n"
+                f"\n\n<b>Section {i}:</b> {html.escape(sec['name'])}\n"
                 f"  Questions: {sec['question_range'][0]} to {sec['question_range'][1]}\n"
                 f"  Timer: {sec.get('timer', 'N/A')}s"
             )
@@ -350,7 +391,12 @@ async def _finalize_quiz(
     if config.BOT_GROUP:
         try:
             announce_text = strip_source_noise(text) or text
-            await c.send_message(config.BOT_GROUP, announce_text, reply_markup=InlineKeyboardMarkup(kb_buttons[:3]))
+            await c.send_message(
+                config.BOT_GROUP,
+                announce_text,
+                reply_markup=InlineKeyboardMarkup(kb_buttons[:3]),
+                parse_mode=ParseMode.HTML,
+            )
         except Exception:
             logger.debug("Failed to announce new quiz in BOT_GROUP", exc_info=True)
 
@@ -410,27 +456,55 @@ async def handle_document(c: Client, m: Message) -> None:
         return
     if uid not in state.quiz_creation:
         return
+
     allowed_types = ("text/plain", "application/json")
-    if m.document.mime_type not in allowed_types:
+    is_valid_type = m.document.mime_type in allowed_types or (
+        m.document.file_name and m.document.file_name.lower().endswith((".txt", ".json"))
+    )
+    if not is_valid_type:
         await m.reply("⚠️ Only .txt or .json files are supported for quiz questions.")
         return
 
-    status = await m.reply("⏳ Processing...")
-    file_bytes = await c.download_media(m.document.file_id, in_memory=True)
-    file_bytes.seek(0)
-    content = file_bytes.read()
+    status = await m.reply("⏳ Processing document...")
+    try:
+        file_bytes = await c.download_media(m.document.file_id, in_memory=True)
+        file_bytes.seek(0)
+        content = file_bytes.read()
 
-    user = await UserRepository(get_db()).get_or_create(uid)
-    remove_words = user.get("remove_words", [])
+        user = await _get_user_safely(uid)
+        remove_words = user.get("remove_words", [])
 
-    count, error = process_uploaded_file(
-        content, m.document.file_name or "upload.txt", state.quiz_creation[uid]["questions"], remove_words
-    )
-    if error:
-        await status.edit_text(f"❌ Error: {error}")
-    else:
-        total = len(state.quiz_creation[uid]["questions"])
-        await status.edit_text(f"✅ {count} questions processed! Total: {total}\nSend more, /aiquiz, or /done")
+        # Accommodate both 2-argument and 4-argument implementations safely
+        sig = inspect.signature(process_uploaded_file)
+        param_count = len(sig.parameters)
+
+        if param_count >= 4:
+            count, error = process_uploaded_file(
+                content,
+                m.document.file_name or "upload.txt",
+                state.quiz_creation[uid]["questions"],
+                remove_words,
+            )
+        else:
+            res, error = process_uploaded_file(content, m.document.file_name or "upload.txt")
+            if not error and isinstance(res, list):
+                state.quiz_creation[uid]["questions"].extend(res)
+                count = len(res)
+            else:
+                count = res if isinstance(res, int) else 0
+
+        if error:
+            await status.edit_text(f"❌ Error: {error}")
+        else:
+            total = len(state.quiz_creation[uid]["questions"])
+            await status.edit_text(
+                f"✅ <b>{count} questions processed!</b> Total: <b>{total}</b>\n"
+                f"Send more, use <code>/aiquiz</code>, or finish with <code>/done</code>.",
+                parse_mode=ParseMode.HTML,
+            )
+    except Exception as exc:
+        logger.exception("Failed processing uploaded document: %s", exc)
+        await status.edit_text(f"❌ Processing failed: <code>{html.escape(str(exc))}</code>", parse_mode=ParseMode.HTML)
 
 
 async def handle_creation_message(c: Client, m: Message) -> None:
@@ -445,7 +519,8 @@ async def handle_creation_message(c: Client, m: Message) -> None:
         if poll.type != PollType.QUIZ:
             await m.reply("⚠️ Only quiz-type polls are supported.")
             return
-        user = await UserRepository(get_db()).get_or_create(uid)
+
+        user = await _get_user_safely(uid)
         remove_words = user.get("remove_words", [])
         question = strip_source_noise(filter_words(_poll_text(poll.question), remove_words))
         options = [filter_words(_poll_text(o.text), remove_words) for o in poll.options]
@@ -467,8 +542,12 @@ async def handle_creation_message(c: Client, m: Message) -> None:
                 logger.debug("Failed to copy poll's reply photo", exc_info=True)
         ud["questions"].append(
             {
-                "question": question, "options": options, "correct_option_id": correct_id,
-                "explanation": explanation, "file_id": file_id, "reply_text": reply_text,
+                "question": question,
+                "options": options,
+                "correct_option_id": correct_id,
+                "explanation": explanation,
+                "file_id": file_id,
+                "reply_text": reply_text,
             }
         )
         await m.reply(f"✅ {len(ud['questions'])} saved! Send more, /aiquiz, or /done")
@@ -484,7 +563,11 @@ async def handle_creation_message(c: Client, m: Message) -> None:
             return
         ud["quiz_name"] = name
         ud["awaiting_name"] = False
-        await m.reply(f"📝 Name: **{name}**\nSend questions, forward quiz polls, use `/aiquiz <topic>`, or upload a .txt file. /cancel to abort.")
+        await m.reply(
+            f"📝 Name: <b>{html.escape(name)}</b>\n"
+            f"Send questions, forward quiz polls, use <code>/aiquiz &lt;topic&gt;</code>, or upload a .txt file. <code>/cancel</code> to abort.",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if ud.get("awaiting_section_choice"):
@@ -591,8 +674,10 @@ async def handle_creation_message(c: Client, m: Message) -> None:
                 ]
             )
             await m.reply(
-                f"💡 **Add default text to {field_labels.get(default_text_field, 'fields')}?**\n\n`{default_text[:100]}`",
+                f"💡 <b>Add default text to {field_labels.get(default_text_field, 'fields')}?</b>\n\n"
+                f"<code>{html.escape(default_text[:100])}</code>",
                 reply_markup=kb,
+                parse_mode=ParseMode.HTML,
             )
             return
         ud["awaiting_type"] = True
